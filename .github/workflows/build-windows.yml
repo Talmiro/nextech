@@ -21,10 +21,12 @@ jobs:
       - name: Compilar o executavel em modo Release
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: Instalar Inno Setup
+        run: choco install innosetup -y
+
       - name: Criar o Instalador com Inno Setup
-        uses: ISCC/Inno-Setup-Action@v1
-        with:
-          filepath: setup.iss
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 
       - name: Disponibilizar Instalador para Download (Artifact)
         uses: actions/upload-artifact@v4
