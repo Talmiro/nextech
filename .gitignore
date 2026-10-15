@@ -1,0 +1,38 @@
+# Rust / Cargo
+/target
+
+# Banco de Dados SQLite (Locais e Temporários)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Relatórios, Recibos e Exportações Geradas
+/*.csv
+/*.html
+/dist/
+
+# Binários e Pacotes do Windows
+*.exe
+*.msi
+*.dll
+
+# IDEs e Editores de Código
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos de Sistema (macOS, Windows, Linux)
+.DS_Store
+**/.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Arquivos Temporários e Logs
+*.log
+*.tmp

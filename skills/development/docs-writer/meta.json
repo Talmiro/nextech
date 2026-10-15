@@ -1,0 +1,9 @@
+{
+  "name": "docs-writer",
+  "description": "Write, review, and edit documentation files with consistent structure, tone, and technical accuracy. Use when creating docs, reviewing markdown files, writing READMEs, updating `/docs` directories, or",
+  "category": "development",
+  "tags": [
+    "writer"
+  ],
+  "version": "1.0.0"
+}

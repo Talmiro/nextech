@@ -1,0 +1,13 @@
+{
+  "name": "quality",
+  "description": "Parent skill for quality. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "web-quality-audit",
+    "web-accessibility",
+    "react-best-practices",
+    "seo",
+    "web-best-practices"
+  ],
+  "version": "1.0.0"
+}

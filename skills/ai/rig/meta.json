@@ -1,0 +1,16 @@
+{
+  "name": "rig",
+  "description": "Build LLM-powered applications with Rig, the Rust AI framework. Use when creating agents, RAG pipelines, tool-calling workflows, structured extraction, or streaming completions. Supports 19+ LLM providers.",
+  "category": "ai",
+  "tags": [
+    "rig",
+    "rust",
+    "llm",
+    "ai",
+    "agents",
+    "rag",
+    "openai",
+    "anthropic"
+  ],
+  "version": "1.0.0"
+}

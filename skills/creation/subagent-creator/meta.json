@@ -1,0 +1,9 @@
+{
+  "name": "subagent-creator",
+  "description": "Guide for creating AI subagents with isolated context for complex multi-step workflows. Use when users want to create a subagent, specialized agent, verifier, debugger, or orchestrator that requires i",
+  "category": "creation",
+  "tags": [
+    "creator"
+  ],
+  "version": "1.0.0"
+}

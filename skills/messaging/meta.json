@@ -1,0 +1,10 @@
+{
+  "name": "messaging",
+  "description": "Parent skill for messaging. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "zenoh",
+    "zmq"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "web-quality-audit",
+  "description": "Comprehensive web quality audit covering performance, accessibility, SEO, and best practices in a single review. Use when asked to \"audit my site\", \"review web quality\", \"run lighthouse audit\", \"check",
+  "category": "quality",
+  "tags": [
+    "audit"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "learning",
+  "description": "Parent skill for learning. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "learning-opportunities"
+  ],
+  "version": "1.0.0"
+}

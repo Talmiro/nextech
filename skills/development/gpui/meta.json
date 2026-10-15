@@ -1,0 +1,14 @@
+{
+  "name": "gpui",
+  "description": "Build UI applications with GPUI, Zed's native GUI framework. Use when creating UI components, managing state, handling events, implementing layouts, or building desktop applications in Rust.",
+  "category": "ui",
+  "tags": [
+    "gpui",
+    "rust",
+    "gui",
+    "desktop",
+    "ui",
+    "zed"
+  ],
+  "version": "1.0.0"
+}

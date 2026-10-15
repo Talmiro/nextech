@@ -1,0 +1,9 @@
+{
+  "name": "shopify-developer",
+  "description": "Complete Shopify development reference covering Liquid templating, OS 2.0 themes, GraphQL APIs, Hydrogen, Functions, and performance optimization (API v2026-01). Use when working with .liquid files, b",
+  "category": "development",
+  "tags": [
+    "developer"
+  ],
+  "version": "1.0.0"
+}

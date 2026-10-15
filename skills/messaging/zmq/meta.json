@@ -1,0 +1,7 @@
+{
+  "name": "zmq",
+  "description": "ZeroMQ (zmq) - high-performance async messaging. PUB/SUB, REQ/REP, DEALER/ROUTER, PUSH/PULL, PAIR, STREAM, XPUB/XSUB patterns.",
+  "category": "development",
+  "tags": ["rust", "zmq", "pub/sub", "req/rep", "channels", "topics"],
+  "version": "1.0.0"
+}

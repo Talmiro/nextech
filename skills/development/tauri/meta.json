@@ -1,0 +1,14 @@
+{
+  "name": "tauri",
+  "description": "Tauri cross-platform app development with Rust backend. Use when configuring tauri.conf.json, implementing Rust commands (#[tauri::command]), setting up IPC patterns (invoke, emit, channels), configuring permissions/capabilities, troubleshooting build issues, or deploying desktop/mobile apps.",
+  "category": "framework",
+  "tags": [
+    "tauri",
+    "rust",
+    "desktop",
+    "mobile",
+    "cross-platform",
+    "gui"
+  ],
+  "version": "2.0.0"
+}

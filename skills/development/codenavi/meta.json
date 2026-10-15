@@ -1,0 +1,9 @@
+{
+  "name": "codenavi",
+  "description": "Your pathfinder for navigating unknown codebases. Investigates with precision, implements surgically, and never assumes \u2014 if it doesn't know, it says so. Maintains a .notebook/ knowledge base that gro",
+  "category": "development",
+  "tags": [
+    "codenavi"
+  ],
+  "version": "1.0.0"
+}

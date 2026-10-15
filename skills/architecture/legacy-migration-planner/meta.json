@@ -1,0 +1,9 @@
+{
+  "name": "legacy-migration-planner",
+  "description": "Use when planning legacy system migrations, codebase modernization, monolith decomposition, microservices consolidation, cross-language rewrites, or framework upgrades. Invoke for strangler fig patter",
+  "category": "architecture",
+  "tags": [
+    "planner"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "skill-architect",
+  "description": "Expert guide for designing and building high-quality skills from scratch through structured conversation. Use when someone wants to create a new skill, build a skill, design a skill, or asks for help ",
+  "category": "creation",
+  "tags": [
+    "architect"
+  ],
+  "version": "1.0.0"
+}

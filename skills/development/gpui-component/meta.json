@@ -1,0 +1,14 @@
+{
+  "name": "gpui-component",
+  "description": "Build desktop UI applications with GPUI Component, a comprehensive Rust component library for GPUI. Use when creating UI components, using pre-built components (Button, Dialog, Table, Select, etc.), managing forms, or building desktop applications.",
+  "category": "ui",
+  "tags": [
+    "gpui",
+    "gpui-component",
+    "rust",
+    "gui",
+    "desktop",
+    "ui-components"
+  ],
+  "version": "1.0.0"
+}

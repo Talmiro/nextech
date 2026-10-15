@@ -1,0 +1,9 @@
+{
+  "name": "decision-making",
+  "description": "Parent skill for decision-making. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "the-fool"
+  ],
+  "version": "1.0.0"
+}

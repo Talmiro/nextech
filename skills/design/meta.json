@@ -1,0 +1,12 @@
+{
+  "name": "design",
+  "description": "Parent skill for design. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "figma",
+    "figma-implement-design",
+    "web-design-guidelines",
+    "frontend-design"
+  ],
+  "version": "1.0.0"
+}

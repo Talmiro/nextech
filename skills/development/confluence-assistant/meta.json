@@ -1,0 +1,9 @@
+{
+  "name": "confluence-assistant",
+  "description": "Expert in Confluence operations using Atlassian MCP. Use when the user says \"search Confluence\", \"create a Confluence page\", \"update a page\", \"find documentation in Confluence\", \"list spaces\", or \"add",
+  "category": "development",
+  "tags": [
+    "assistant"
+  ],
+  "version": "1.0.0"
+}

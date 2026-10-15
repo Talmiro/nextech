@@ -1,0 +1,18 @@
+{
+  "name": "architecture",
+  "description": "Parent skill for architecture. Routes to specialized sub-skills.",
+  "category": "meta",
+  "tags": [
+    "coupling-analysis",
+    "domain-analysis",
+    "component-identification-sizing",
+    "component-common-domain-detection",
+    "component-flattening-analysis",
+    "domain-identification-grouping",
+    "legacy-migration-planner",
+    "decomposition-planning-roadmap",
+    "frontend-blueprint",
+    "react-composition-patterns"
+  ],
+  "version": "1.0.0"
+}

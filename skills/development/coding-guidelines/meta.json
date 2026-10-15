@@ -1,0 +1,9 @@
+{
+  "name": "coding-guidelines",
+  "description": "Behavioral guidelines to reduce common LLM coding mistakes. Use when writing, modifying, or reviewing code \u2014 implementation tasks, code changes, refactoring, bug fixes, or feature development. Do NOT ",
+  "category": "development",
+  "tags": [
+    "guidelines"
+  ],
+  "version": "1.0.0"
+}
