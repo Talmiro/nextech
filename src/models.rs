@@ -9,6 +9,14 @@ pub struct Sale {
     pub total_price: f64,
     pub payment_method: PaymentMethod,
     pub paid_amount: f64,
+    /// Valor entregue pelo cliente no ato (para Troco). À vista quitada:
+    /// `paid_amount == total_price` SEMPRE (caixa soma o total, nunca o
+    /// recebido); `valor_recebido >= total`, `troco = recebido - total`.
+    /// Legadas: `valor_recebido = paid_amount`, `troco = 0`.
+    pub valor_recebido: f64,
+    /// Troco devolvido (`recebido - total`, nunca negativo). Display-only
+    /// no recibo; jamais entra no caixa.
+    pub troco: f64,
     pub client_name: String,
     pub phone: String,
     pub imei: String,
@@ -40,6 +48,11 @@ impl Sale {
 }
 
 /// Tipo de atendimento do PDV (assistência técnica).
+///
+/// `Mista` é o cabeçalho de um carrinho multi-categoria (Serviço +
+/// Acessório + Aparelho na mesma venda). Linhas individuais (`SaleItem`)
+/// carregam a categoria real em `item_type`; o cabeçalho guarda `Mista`
+/// apenas como marcador genérico para recibo/relatórios legados.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SaleType {
     /// Venda rápida de balcão (acessórios). Sem cliente obrigatório.
@@ -49,6 +62,8 @@ pub enum SaleType {
     Servico,
     /// Venda de aparelho. Exige nome do cliente + IMEI/série (garantia).
     Aparelho,
+    /// Carrinho misto (2+ categorias). Recibo usa título genérico.
+    Mista,
 }
 
 impl SaleType {
@@ -57,6 +72,7 @@ impl SaleType {
             SaleType::Rapida => "rapida",
             SaleType::Servico => "servico",
             SaleType::Aparelho => "aparelho",
+            SaleType::Mista => "mista",
         }
     }
 
@@ -65,6 +81,7 @@ impl SaleType {
             SaleType::Rapida => "Venda Rápida",
             SaleType::Servico => "Serviço",
             SaleType::Aparelho => "Aparelho",
+            SaleType::Mista => "Venda Mista",
         }
     }
 
@@ -74,16 +91,28 @@ impl SaleType {
             "rapida" => Some(SaleType::Rapida),
             "servico" => Some(SaleType::Servico),
             "aparelho" => Some(SaleType::Aparelho),
+            "mista" => Some(SaleType::Mista),
             _ => None,
         }
     }
 
     /// Nome do cliente é obrigatório (garantia) neste tipo.
+    ///
+    /// `Mista` retorna `true`: um carrinho misto sempre contém Serviço
+    /// e/ou Aparelho (acessórios puros nunca são "mistos"), logo a
+    /// garantia exige cliente. A validação fina é por-linha
+    /// (`sale_requires_client`).
     pub fn requires_client(&self) -> bool {
-        matches!(self, SaleType::Servico | SaleType::Aparelho)
+        matches!(
+            self,
+            SaleType::Servico | SaleType::Aparelho | SaleType::Mista
+        )
     }
 
     /// IMEI/série é obrigatório (rastreio de garantia) neste tipo.
+    ///
+    /// `Mista` retorna `false`: a exigência é por-linha (cada item
+    /// Aparelho exige o próprio IMEI), nunca do cabeçalho.
     pub fn requires_imei(&self) -> bool {
         matches!(self, SaleType::Aparelho)
     }
@@ -142,6 +171,12 @@ pub fn status_for(total: f64, paid: f64) -> SaleStatus {
     }
 }
 
+/// Meio de pagamento LEGADO (leitura de bancos antigos).
+///
+/// Removido das telas de Venda/Caixa/Fiados: nenhuma venda nova deve
+/// exigir seleção de meio. Novas vendas gravam `'Cash'` fixo no banco
+/// apenas por compatibilidade de esquema; o valor nunca é exibido.
+/// Mantido para `from_str` de histórico + shims `#[deprecated]` em `db`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PaymentMethod {
     #[default]
@@ -290,7 +325,7 @@ pub struct MovimentoCaixa {
     pub created_at: String,
 }
 
-/// Linha de uma venda multi-item.
+/// Linha de uma venda multi-item (carrinho multi-categoria).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaleItem {
     pub id: i64,
@@ -300,6 +335,11 @@ pub struct SaleItem {
     pub unit_price: f64,
     pub total_price: f64,
     pub imei: String,
+    /// Categoria da linha (reuso de `SaleType` para churn mínimo:
+    /// `Rapida` = acessório/produto de balcão).
+    /// Vendas legadas (anteriores à coluna) chegam como `Rapida` e são
+    /// reconciliadas pelo backfill a partir de `sales.sale_type`.
+    pub item_type: SaleType,
 }
 
 /// Nome-resumo exibido em tabelas e no CSV: só o primeiro item quando a
@@ -316,8 +356,7 @@ pub fn summary_name(first_name: &str, extra_count: usize) -> String {
     format!("{first} (+{extra_count} itens)")
 }
 
-/// Texto da coluna "Unitário": média de `unit_price` seria enganosa no
-/// multi-item (ex.: 1000 + 350 → 675), então exibe `—` quando há 2+ linhas.
+/// Texto da coluna "Unitário": média de `unit_price` seria enganosa no/// multi-item (ex.: 1000 + 350 → 675), então exibe `—` quando há 2+ linhas.
 #[must_use]
 pub fn unit_price_display(sale: &Sale) -> String {
     if sale.item_count > 1 {
@@ -328,12 +367,16 @@ pub fn unit_price_display(sale: &Sale) -> String {
 }
 
 /// Rótulo contextual do campo/coluna de item por tipo de atendimento.
+///
+/// `Mista` (cabeçalho genérico) usa o rótulo neutro "Item"; linhas
+/// individuais nunca são `Mista` — cada linha tem sua categoria real.
 #[must_use]
 pub fn item_label(sale_type: SaleType) -> &'static str {
     match sale_type {
         SaleType::Rapida => "Produto / Acessório",
         SaleType::Servico => "Serviço Executado",
         SaleType::Aparelho => "Modelo do Aparelho",
+        SaleType::Mista => "Item",
     }
 }
 
@@ -344,18 +387,66 @@ pub fn item_hint(sale_type: SaleType) -> &'static str {
         SaleType::Rapida => "Ex.: Capinha, Película...",
         SaleType::Servico => "Ex.: Troca de tela, Bateria...",
         SaleType::Aparelho => "Ex.: Samsung A15 128GB, iPhone 11...",
+        SaleType::Mista => "Ex.: Produto, serviço ou aparelho...",
+    }
+}
+
+/// Cliente é obrigatório se QUALQUER linha exigir (Serviço, Aparelho
+/// ou cabeçalho Misto). Acessórios puros (`Rapida`) dispensam.
+#[must_use]
+pub fn sale_requires_client(items: &[NewSaleItem]) -> bool {
+    items.iter().any(|i| i.item_type.requires_client())
+}
+
+/// Cabeçalho da venda: tipo único se todas as linhas coincidem,
+/// `Mista` caso contrário (carrinho multi-categoria).
+#[must_use]
+pub fn header_type_for(items: &[NewSaleItem]) -> SaleType {
+    let Some(first) = items.first() else {
+        return SaleType::Rapida;
+    };
+    // `Mista` nunca aparece como categoria de linha (só cabeçalho);
+    // se vazar, trata como misto.
+    if first.item_type == SaleType::Mista {
+        return SaleType::Mista;
+    }
+    if items.iter().all(|i| i.item_type == first.item_type) {
+        first.item_type
+    } else {
+        SaleType::Mista
+    }
+}
+
+/// Parse de valor monetário BR (`"600"`, `"600,50"`, `" 600.50 "`).
+/// Retorna `None` para vazio, inválido, não-finito ou negativo.
+#[must_use]
+pub fn parse_valor_br(s: &str) -> Option<f64> {
+    let t = s.trim().replace(',', ".");
+    if t.is_empty() {
+        return None;
+    }
+    match t.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Some(v),
+        _ => None,
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct NewSale {
     pub items: Vec<NewSaleItem>,
+    /// LEGADO: ignorado por `add_sale` (sempre grava `'Cash'`).
+    /// Mantido como `Option` para a UI antiga compilar até a fase Egui.
     pub payment_method: Option<PaymentMethod>,
     pub client_name: String,
     pub phone: String,
+    /// LEGADO de entrada: `add_sale` recalcula via `header_type_for`.
+    /// Mantido para compilar a UI antiga; o valor enviado é ignorado.
     pub sale_type: SaleType,
     pub paid_amount: String,
     pub is_fiado: bool,
+    /// Valor entregue pelo cliente (texto BR, opcional). Vazio = exato
+    /// (troco 0). Só vale para pagamento imediato; fiado ignora.
+    pub valor_recebido: String,
 }
 
 /// Linha do rascunho em `render_pos` (strings de formulário).
@@ -365,6 +456,8 @@ pub struct NewSaleItem {
     pub quantity: String,
     pub unit_price: String,
     pub imei: String,
+    /// Categoria escolhida no botão "Add Item" (`Rapida` = acessório).
+    pub item_type: SaleType,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -410,6 +503,8 @@ mod tests {
             total_price: unit,
             payment_method: PaymentMethod::Cash,
             paid_amount: unit,
+            valor_recebido: unit,
+            troco: 0.0,
             client_name: String::new(),
             phone: String::new(),
             imei: String::new(),
@@ -438,6 +533,7 @@ mod tests {
         assert_eq!(item_label(SaleType::Rapida), "Produto / Acessório");
         assert_eq!(item_label(SaleType::Servico), "Serviço Executado");
         assert_eq!(item_label(SaleType::Aparelho), "Modelo do Aparelho");
+        assert_eq!(item_label(SaleType::Mista), "Item");
         assert_eq!(item_hint(SaleType::Rapida), "Ex.: Capinha, Película...");
         assert_eq!(
             item_hint(SaleType::Servico),

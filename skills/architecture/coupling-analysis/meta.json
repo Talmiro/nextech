@@ -1,9 +1,0 @@
-{
-  "name": "coupling-analysis",
-  "description": "Analyzes coupling between modules using the three-dimensional model (strength, distance, volatility) from \"Balancing Coupling in Software Design\". Use when asking \"are these modules too coupled?\", \"sh",
-  "category": "architecture",
-  "tags": [
-    "analysis"
-  ],
-  "version": "1.0.0"
-}

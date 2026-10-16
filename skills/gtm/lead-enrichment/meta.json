@@ -1,9 +1,0 @@
-{
-  "name": "lead-enrichment",
-  "description": "When the user wants to build data enrichment workflows, score leads against ICP, set up Clay waterfalls, or improve contact data quality. Also use when the user mentions 'enrichment,' 'data enrichment",
-  "category": "gtm",
-  "tags": [
-    "enrichment"
-  ],
-  "version": "1.0.0"
-}

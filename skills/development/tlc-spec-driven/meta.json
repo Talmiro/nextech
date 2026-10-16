@@ -1,9 +1,0 @@
-{
-  "name": "tlc-spec-driven",
-  "description": "Project and feature planning with 4 adaptive phases - Specify, Design, Tasks, Execute. Auto-sizes depth by complexity. Creates atomic tasks with verification criteria, atomic git commits, requirement ",
-  "category": "development",
-  "tags": [
-    "driven"
-  ],
-  "version": "1.0.0"
-}

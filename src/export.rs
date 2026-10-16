@@ -10,10 +10,14 @@ use crate::db::ItemSalesSummary;
 use crate::models::{CashEntry, Loss, Sale};
 
 /// Dados necessários para gerar o CSV consolidado do período.
+///
+/// Relatórios são revenue-only: `Faturamento (Total Entradas)`, `Saídas`,
+/// `Perdas` e `Saldo`. Sem cálculo de margem. Meio de pagamento removido.
 pub struct DadosRelatorio<'a> {
     /// Rótulo do período exibido no cabeçalho (ex.: "10/2025", "2025", "10/10/2025", "Geral").
     pub escopo_label: &'a str,
-    /// Filtro de pagamento ativo no relatório (ex.: "Dinheiro"), usado só como informação.
+    /// LEGADO ignorado na geração (mantido para a UI antiga compilar
+    /// até a fase Egui; será excluído com o filtro de pagamento).
     pub filtro_pagamento: &'a str,
     pub total_vendas: f64,
     pub total_recebido: f64,
@@ -78,16 +82,6 @@ pub fn nome_arquivo_sugerido(escopo_label: &str) -> String {
     format!("nextech-relatorio-{base}.csv")
 }
 
-fn pagamento_ptbr(s: &str) -> &str {
-    match s {
-        "Cash" => "Dinheiro",
-        "Card" => "Cartão",
-        "Pix" => "Pix",
-        "Fiado" => "Fiado",
-        _ => "Dinheiro",
-    }
-}
-
 fn situacao_ptbr(s: &crate::models::Sale) -> String {
     let restante = (s.total_price - s.paid_amount).max(0.0);
     format!(
@@ -127,8 +121,8 @@ pub fn gerar_csv_relatorio(dados: &DadosRelatorio) -> Result<Vec<u8>> {
 
     wtr.write_record(["Relatório Financeiro NexTech", dados.escopo_label])
         .context("falha ao escrever cabeçalho do relatório")?;
-    wtr.write_record(["Filtro de pagamento", dados.filtro_pagamento])
-        .context("falha ao escrever filtro do relatório")?;
+    // Filtro de pagamento removido (campo LEGADO ignorado).
+    let _ = dados.filtro_pagamento;
     wtr.write_record([""; 2])
         .context("falha ao escrever separador")?;
 
@@ -169,7 +163,6 @@ pub fn gerar_csv_relatorio(dados: &DadosRelatorio) -> Result<Vec<u8>> {
         "Total (R$)",
         "Recebido (R$)",
         "Restante (R$)",
-        "Pagamento",
         "Situação",
         "Data/Hora",
     ])
@@ -192,7 +185,6 @@ pub fn gerar_csv_relatorio(dados: &DadosRelatorio) -> Result<Vec<u8>> {
             fmt_valor_br(v.total_price),
             fmt_valor_br(v.paid_amount),
             fmt_valor_br((v.total_price - v.paid_amount).max(0.0)),
-            pagamento_ptbr(v.payment_method.as_str()).to_string(),
             situacao_ptbr(v),
             data_hora_br(&v.created_at),
         ])
@@ -374,8 +366,10 @@ mod tests {
             quantity: 1,
             unit_price: 149.9,
             total_price: 149.9,
-            payment_method: PaymentMethod::Pix,
+            payment_method: PaymentMethod::Cash,
             paid_amount: 149.9,
+            valor_recebido: 149.9,
+            troco: 0.0,
             client_name: String::new(),
             phone: String::new(),
             imei: String::new(),
@@ -391,6 +385,7 @@ mod tests {
                 unit_price: 149.9,
                 total_price: 149.9,
                 imei: String::new(),
+                item_type: crate::models::SaleType::Rapida,
             }],
         }
     }

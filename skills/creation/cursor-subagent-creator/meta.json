@@ -1,9 +1,0 @@
-{
-  "name": "cursor-subagent-creator",
-  "description": "Creates Cursor-specific AI subagents with isolated context for complex multi-step workflows. Use when creating subagents for Cursor editor specifically, following Cursor's patterns and directories (.c",
-  "category": "creation",
-  "tags": [
-    "creator"
-  ],
-  "version": "1.0.0"
-}

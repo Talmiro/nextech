@@ -1,9 +1,0 @@
-{
-  "name": "component-flattening-analysis",
-  "description": "Detects misplaced classes and fixes component hierarchy problems \u2014 finds code that should belong inside a component but sits at the root level. Use when asking \"clean up component structure\", \"find or",
-  "category": "architecture",
-  "tags": [
-    "analysis"
-  ],
-  "version": "1.0.0"
-}

@@ -1,9 +1,0 @@
-{
-  "name": "multi-platform-launch",
-  "description": "When the user wants to launch a product across multiple platforms, plan a Product Hunt launch, build a waitlist, or execute a multi-channel launch strategy. Also use when the user mentions 'product la",
-  "category": "gtm",
-  "tags": [
-    "launch"
-  ],
-  "version": "1.0.0"
-}

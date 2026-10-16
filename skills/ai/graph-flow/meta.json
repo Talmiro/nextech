@@ -1,7 +1,0 @@
-{
-  "name": "graph-flow",
-  "description": "High-performance workflow framework for building AI agent systems in Rust",
-  "category": "development",
-  "tags": ["rust", "ai", "workflow", "agents", "llm", "graph"],
-  "version": "1.0.0"
-}

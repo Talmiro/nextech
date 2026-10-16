@@ -1,9 +1,0 @@
-{
-  "name": "create-adr",
-  "description": "Creates Architecture Decision Records (ADRs) to document significant architectural choices and their rationale for future team members. Use when the user says \"write an ADR\", \"document this decision\",",
-  "category": "creation",
-  "tags": [
-    "adr"
-  ],
-  "version": "1.0.0"
-}

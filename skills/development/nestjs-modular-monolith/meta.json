@@ -1,9 +1,0 @@
-{
-  "name": "nestjs-modular-monolith",
-  "description": "Specialist in designing and implementing scalable modular monolith architectures using NestJS with DDD, Clean Architecture, and CQRS patterns. Use when building modular monolith backends, designing bo",
-  "category": "development",
-  "tags": [
-    "monolith"
-  ],
-  "version": "1.0.0"
-}

@@ -1,9 +1,0 @@
-{
-  "name": "ai-pricing",
-  "description": "When the user wants to price an AI product, choose a charge metric, design pricing tiers, or optimize margins. Also use when the user mentions 'AI pricing,' 'usage-based pricing,' 'consumption pricing",
-  "category": "gtm",
-  "tags": [
-    "pricing"
-  ],
-  "version": "1.0.0"
-}

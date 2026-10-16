@@ -1,9 +1,0 @@
-{
-  "name": "gtm-engineering",
-  "description": "When the user wants to build GTM automation with code, design workflow architectures, use AI agents for GTM tasks, or implement the 'architecture over tools' principle. Also use when the user mentions",
-  "category": "gtm",
-  "tags": [
-    "engineering"
-  ],
-  "version": "1.0.0"
-}

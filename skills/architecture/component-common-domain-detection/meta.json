@@ -1,9 +1,0 @@
-{
-  "name": "component-common-domain-detection",
-  "description": "Finds duplicate business logic spread across multiple components and suggests consolidation. Use when asking \"where is this logic duplicated?\", \"find common code between services\", \"what can be consol",
-  "category": "architecture",
-  "tags": [
-    "detection"
-  ],
-  "version": "1.0.0"
-}

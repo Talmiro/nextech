@@ -36,3 +36,7 @@ $RECYCLE.BIN/
 # Arquivos Temporários e Logs
 *.log
 *.tmp
+
+# Instruções de agentes de IA (nunca versionar)
+skills/
+_category.json

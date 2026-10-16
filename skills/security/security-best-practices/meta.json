@@ -1,9 +1,0 @@
-{
-  "name": "security-best-practices",
-  "description": "Perform language and framework specific security best-practice reviews and suggest improvements. Use when the user explicitly requests security best practices guidance, a security review or report, or",
-  "category": "security",
-  "tags": [
-    "practices"
-  ],
-  "version": "1.0.0"
-}

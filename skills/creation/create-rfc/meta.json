@@ -1,9 +1,0 @@
-{
-  "name": "create-rfc",
-  "description": "Creates structured Request for Comments (RFC) documents for proposing and deciding on significant changes. Use when the user says \"write an RFC\", \"create a proposal\", \"I need to propose a change\", \"dr",
-  "category": "creation",
-  "tags": [
-    "rfc"
-  ],
-  "version": "1.0.0"
-}

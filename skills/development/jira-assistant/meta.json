@@ -1,9 +1,0 @@
-{
-  "name": "jira-assistant",
-  "description": "Manage Jira issues via Atlassian MCP \u2014 search, create, update, transition status, and handle sprint tasks. Auto-detects workspace configuration. Use when user says \"create a Jira ticket\", \"update my s",
-  "category": "development",
-  "tags": [
-    "assistant"
-  ],
-  "version": "1.0.0"
-}

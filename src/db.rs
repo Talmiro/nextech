@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::models::{
     CashEntry, CashSource, Loss, MovimentoCaixa, NewCashEntry, NewLoss, NewSale, PaymentMethod,
-    Sale, SaleItem, SaleStatus, SaleType, TipoMovimentoCaixa, agora_local, status_for,
-    summary_name,
+    Sale, SaleItem, SaleStatus, SaleType, TipoMovimentoCaixa, agora_local,
+    header_type_for, sale_requires_client, status_for, summary_name,
 };
 
 pub struct Database {
@@ -127,6 +127,8 @@ impl Database {
                 sale_type TEXT NOT NULL DEFAULT 'rapida',
                 item_count INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'quitado',
+                valor_recebido REAL NOT NULL DEFAULT 0.0,
+                troco REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             CREATE TABLE IF NOT EXISTS cash_entries (
@@ -152,6 +154,7 @@ impl Database {
                 unit_price REAL NOT NULL,
                 total_price REAL NOT NULL,
                 imei TEXT NOT NULL DEFAULT '',
+                item_type TEXT NOT NULL DEFAULT 'rapida',
                 position INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
@@ -162,7 +165,9 @@ impl Database {
         self.migrate_fiado_columns()?;
         self.migrate_pos_fields()?;
         self.migrate_sale_items()?;
+        self.migrate_item_type()?;
         self.migrate_item_count()?;
+        self.migrate_troco_columns()?;
         Ok(())
     }
 
@@ -277,12 +282,46 @@ impl Database {
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Failed to index sale_items: {}", e))?;
+        // Backfill herda a categoria da venda-mãe (`sales.sale_type`).
+        // Roda antes de `migrate_item_type` para bancos onde a coluna
+        // ainda não existia no momento do CREATE (migração de esquema).
+        if self.table_has_column("sale_items", "item_type") {
+            self.conn
+                .execute(
+                    "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, item_type, position) SELECT id, name, quantity, unit_price, quantity * unit_price, imei, COALESCE(NULLIF(sale_type, ''), 'rapida'), 0 FROM sales WHERE id NOT IN (SELECT sale_id FROM sale_items)",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to backfill sale_items: {}", e))?;
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, position) SELECT id, name, quantity, unit_price, quantity * unit_price, imei, 0 FROM sales WHERE id NOT IN (SELECT sale_id FROM sale_items)",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to backfill sale_items: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Garante a coluna `sale_items.item_type` (categoria por linha).
+    ///
+    /// Reuso de `SaleType` para churn mínimo (`rapida` = acessório).
+    /// Linhas pré-existentes herdam `sales.sale_type` da venda-mãe.
+    fn migrate_item_type(&mut self) -> Result<()> {
+        if !self.table_has_column("sale_items", "item_type") {
+            self.conn
+                .execute(
+                    "ALTER TABLE sale_items ADD COLUMN item_type TEXT NOT NULL DEFAULT 'rapida'",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to migrate sale_items (item_type): {}", e))?;
+        }
         self.conn
             .execute(
-                "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, position) SELECT id, name, quantity, unit_price, quantity * unit_price, imei, 0 FROM sales WHERE id NOT IN (SELECT sale_id FROM sale_items)",
+                "UPDATE sale_items SET item_type = (SELECT COALESCE(NULLIF(sales.sale_type, ''), 'rapida') FROM sales WHERE sales.id = sale_items.sale_id) WHERE item_type IS NULL OR item_type = ''",
                 [],
             )
-            .map_err(|e| anyhow::anyhow!("Failed to backfill sale_items: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to backfill item_type: {}", e))?;
         Ok(())
     }
 
@@ -306,17 +345,60 @@ impl Database {
         Ok(())
     }
 
-    /// Registra a venda multi-item e retorna o ID gerado.
+    /// Garante as colunas `sales.valor_recebido` / `sales.troco` (Troco).
+    /// Backfill legado: `recebido = paid_amount`, `troco = 0`.
+    fn migrate_troco_columns(&mut self) -> Result<()> {
+        for (col, ddl) in [
+            (
+                "valor_recebido",
+                "ALTER TABLE sales ADD COLUMN valor_recebido REAL NOT NULL DEFAULT 0.0",
+            ),
+            (
+                "troco",
+                "ALTER TABLE sales ADD COLUMN troco REAL NOT NULL DEFAULT 0.0",
+            ),
+        ] {
+            if !self.table_has_column("sales", col) {
+                self.conn
+                    .execute(ddl, [])
+                    .map_err(|e| anyhow::anyhow!("Failed to migrate sales ({col}): {}", e))?;
+            }
+        }
+        self.conn
+            .execute(
+                "UPDATE sales SET valor_recebido = paid_amount WHERE valor_recebido = 0 AND paid_amount > 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to backfill valor_recebido: {}", e))?;
+        Ok(())
+    }
+
+    /// Registra a venda multi-item multi-categoria e retorna o ID gerado.
     ///
     /// Valida cada linha, soma os subtotais e grava cabeçalho + itens em
     /// uma transação (tudo ou nada). O cabeçalho guarda o resumo de
-    /// exibição (`summary_name`); o financeiro usa só o total somado.
+    /// exibição (`summary_name`) e o tipo agregado (`header_type_for`:
+    /// tipo único ou `Mista`); o financeiro usa só o total somado.
+    ///
+    /// Meio de pagamento removido: `NewSale::payment_method` é ignorado e
+    /// a coluna `sales.payment_method` grava `'Cash'` fixo (compat de
+    /// esquema; nunca exibido). `sales.sale_type` de entrada é ignorado e
+    /// recalculado das linhas.
+    ///
+    /// Troco (pagamento imediato): `valor_recebido` vazio = exato
+    /// (troco 0); preenchido e maior que o total = troco devolvido.
+    /// O caixa soma EXATAMENTE o total (`paid = initial = total` na
+    /// quitada); o recebido NUNCA entra no saldo.
+    /// Fiado/parcial: lógica existente (`paid_amount` = entrada real,
+    /// `valor_recebido` ignorado, troco 0).
     ///
     /// # Erros
     ///
     /// Retorna erro se a lista estiver vazia, se qualquer linha for
-    /// inválida, se o pago sair do intervalo [0, total] ou se faltar
-    /// cliente/IMEI (item #1 no Aparelho) quando o tipo exigir.
+    /// inválida, se o pago sair do intervalo [0, total], se o recebido
+    /// (à vista) for menor que o total, se faltar cliente
+    /// (qualquer linha Serviço/Aparelho/Mista, ou fiado parcial/pendente)
+    /// ou se faltar IMEI em qualquer linha Aparelho.
     pub fn add_sale(&mut self, sale: &NewSale) -> Result<i64> {
         if sale.items.is_empty() {
             anyhow::bail!("Sale must have at least one item");
@@ -327,6 +409,7 @@ impl Database {
             unit_price: f64,
             subtotal: f64,
             imei: String,
+            item_type: SaleType,
         }
         let mut parsed: Vec<ParsedItem> = Vec::with_capacity(sale.items.len());
         for (idx, item) in sale.items.iter().enumerate() {
@@ -352,11 +435,15 @@ impl Database {
             if !unit_price.is_finite() || unit_price <= 0.0 {
                 anyhow::bail!("Item {n}: invalid unit price");
             }
-            // Rastreio de garantia: no Aparelho, o item #1 exige IMEI/série;
-            // linhas extras (ex.: acessórios) têm IMEI opcional.
+            // Rastreio de garantia por-linha: cada item Aparelho exige o
+            // próprio IMEI/série; Serviço e acessório têm IMEI opcional.
+            // `Mista` nunca aparece como categoria de linha.
+            if item.item_type == SaleType::Mista {
+                anyhow::bail!("Item {n}: invalid item category");
+            }
             let imei = item.imei.trim().to_string();
-            if idx == 0 && sale.sale_type.requires_imei() && imei.is_empty() {
-                anyhow::bail!("Item {n}: IMEI/serial is required for device sales");
+            if item.item_type.requires_imei() && imei.is_empty() {
+                anyhow::bail!("Item {n}: IMEI/serial is required for device items");
             }
             parsed.push(ParsedItem {
                 name,
@@ -364,16 +451,14 @@ impl Database {
                 unit_price,
                 subtotal: (quantity as f64) * unit_price,
                 imei,
+                item_type: item.item_type,
             });
         }
         let total: f64 = parsed.iter().map(|i| i.subtotal).sum();
-        let pm = sale
-            .payment_method
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Payment method is required"))?;
+        // Pagamento removido: ignora `sale.payment_method` (compat UI antiga).
+        let header_type = header_type_for(&sale.items);
         // Valor recebido no ato: vazio = quitação integral, exceto venda
-        // fiado/parcial (vazio = nada recebido). A chave é `is_fiado`;
-        // `PaymentMethod::Fiado` persiste só para leitura legada.
+        // fiado/parcial (vazio = nada recebido). A chave é `is_fiado`.
         let paid_raw = sale.paid_amount.trim().replace(',', ".");
         let mut paid = if paid_raw.is_empty() {
             if sale.is_fiado { 0.0 } else { total }
@@ -391,12 +476,38 @@ impl Database {
             paid = total;
         }
         let status = status_for(total, paid);
+        // Troco: só venda imediata quitada (não-fiado, pago == total).
+        // Vazio = exato (troco 0). Recebido < total falha; recebido >
+        // total gera troco, mas o caixa registra EXATAMENTE o total
+        // (`paid/initial` já valem `total` na quitada). Parcial/pendente
+        // (fiado ou entrada parcial) ignora o campo, troco sempre 0.
+        let (valor_recebido, troco) = if !sale.is_fiado
+            && matches!(status, SaleStatus::Quitado)
+        {
+            let raw = sale.valor_recebido.trim().replace(',', ".");
+            if raw.is_empty() {
+                (total, 0.0)
+            } else {
+                let recebido: f64 = raw.parse().context("Invalid received amount")?;
+                if !recebido.is_finite() {
+                    anyhow::bail!("Invalid received amount");
+                }
+                if recebido + 1e-6 < total {
+                    anyhow::bail!("Received amount is less than the total");
+                }
+                let troco = (recebido - total).max(0.0);
+                (recebido, troco)
+            }
+        } else {
+            (paid, 0.0)
+        };
         if !matches!(status, SaleStatus::Quitado) && sale.client_name.trim().is_empty() {
             anyhow::bail!("Client name is required for partial or pending sales");
         }
-        // Garantia: Serviço e Aparelho exigem cliente mesmo quando quitados.
-        if sale.sale_type.requires_client() && sale.client_name.trim().is_empty() {
-            anyhow::bail!("Client name is required for service and device sales");
+        // Garantia por-linha: qualquer Serviço/Aparelho/Misto exige cliente
+        // mesmo quando quitado. Acessórios puros dispensam.
+        if sale_requires_client(&sale.items) && sale.client_name.trim().is_empty() {
+            anyhow::bail!("Client name is required for service and device items");
         }
         let total_qty: i64 = parsed.iter().map(|i| i.quantity).sum();
         let display_unit = if total_qty > 0 {
@@ -412,27 +523,28 @@ impl Database {
             .transaction()
             .context("Failed to begin transaction")?;
         tx.execute(
-            "INSERT INTO sales (name, quantity, unit_price, total_price, payment_method, paid_amount, initial_paid, client_name, phone, imei, sale_type, item_count, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO sales (name, quantity, unit_price, total_price, payment_method, paid_amount, initial_paid, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at) VALUES (?1, ?2, ?3, ?4, 'Cash', ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 header_name,
                 total_qty,
                 display_unit,
                 total,
-                pm.as_str(),
                 paid,
                 sale.client_name.trim(),
                 sale.phone.trim(),
                 first_imei,
-                sale.sale_type.as_str(),
+                header_type.as_str(),
                 parsed.len() as i64,
                 status.as_str(),
+                valor_recebido,
+                troco,
                 now
             ],
         )?;
         let sale_id = tx.last_insert_rowid();
         for (pos, item) in parsed.iter().enumerate() {
             tx.execute(
-                "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, item_type, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     sale_id,
                     item.name,
@@ -440,6 +552,7 @@ impl Database {
                     item.unit_price,
                     item.subtotal,
                     item.imei,
+                    item.item_type.as_str(),
                     pos as i64
                 ],
             )?;
@@ -486,6 +599,8 @@ impl Database {
         sale_type: String,
         item_count: i64,
         status: String,
+        valor_recebido: f64,
+        troco: f64,
         created_at: String,
     ) -> Sale {
         Sale {
@@ -497,6 +612,13 @@ impl Database {
             payment_method: PaymentMethod::from_str(payment_method.as_str())
                 .unwrap_or(PaymentMethod::Cash),
             paid_amount,
+            // Legadas sem colunas: recebido = pago, troco 0.
+            valor_recebido: if valor_recebido > 0.0 {
+                valor_recebido
+            } else {
+                paid_amount
+            },
+            troco: troco.max(0.0),
             client_name,
             phone,
             imei,
@@ -514,13 +636,52 @@ impl Database {
     /// (venda anterior ao backfill), sintetiza 1 item do cabeçalho para
     /// recibo/busca funcionarem de modo uniforme.
     pub fn get_items_for_sale(&self, sale_id: i64) -> Vec<SaleItem> {
-        let mut stmt = match self.conn.prepare(
+        // `item_type` pode não existir em bancos abertos por versão antiga
+        // sem `init` (testes com SQL cru): tenta com a coluna e cai para o
+        // SELECT legado, herdando a categoria da venda-mãe.
+        let with_type = self.conn.prepare(
+            "SELECT id, sale_id, name, quantity, unit_price, total_price, imei, item_type FROM sale_items WHERE sale_id = ?1 ORDER BY position, id",
+        );
+        if let Ok(mut stmt) = with_type {
+            let rows = stmt
+                .query_map([sale_id], |r| {
+                    let raw: String = r.get(7).unwrap_or_else(|_| "rapida".to_string());
+                    Ok(SaleItem {
+                        id: r.get(0)?,
+                        sale_id: r.get(1)?,
+                        name: r.get(2)?,
+                        quantity: r.get(3)?,
+                        unit_price: r.get(4)?,
+                        total_price: r.get(5)?,
+                        imei: r.get(6)?,
+                        item_type: SaleType::from_str(raw.as_str())
+                            .unwrap_or(SaleType::Rapida),
+                    })
+                })
+                .unwrap();
+            let items: Vec<SaleItem> = rows.filter_map(|r| r.ok()).collect();
+            if !items.is_empty() {
+                return items;
+            }
+        }
+        let mut fallback = match self.conn.prepare(
             "SELECT id, sale_id, name, quantity, unit_price, total_price, imei FROM sale_items WHERE sale_id = ?1 ORDER BY position, id",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt
+        // Categoria herdada da venda-mãe quando a coluna não existe.
+        let parent_type: SaleType = self
+            .conn
+            .query_row(
+                "SELECT sale_type FROM sales WHERE id = ?1",
+                [sale_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| SaleType::from_str(s.as_str()))
+            .unwrap_or(SaleType::Rapida);
+        let rows = fallback
             .query_map([sale_id], |r| {
                 Ok(SaleItem {
                     id: r.get(0)?,
@@ -530,6 +691,7 @@ impl Database {
                     unit_price: r.get(4)?,
                     total_price: r.get(5)?,
                     imei: r.get(6)?,
+                    item_type: parent_type,
                 })
             })
             .unwrap();
@@ -541,7 +703,7 @@ impl Database {
     }
 
     pub fn get_sales_filtered(&self, query: &str) -> Vec<Sale> {
-        let mut stmt = self.conn.prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE (?1 = '' OR CAST(id AS TEXT) LIKE '%' || ?1 || '%' OR name LIKE '%' || ?1 || '%' COLLATE NOCASE OR client_name LIKE '%' || ?1 || '%' COLLATE NOCASE OR phone LIKE '%' || ?1 || '%' COLLATE NOCASE OR imei LIKE '%' || ?1 || '%' COLLATE NOCASE OR EXISTS (SELECT 1 FROM sale_items WHERE sale_id = sales.id AND (name LIKE '%' || ?1 || '%' COLLATE NOCASE OR imei LIKE '%' || ?1 || '%' COLLATE NOCASE))) ORDER BY id DESC LIMIT 500").unwrap();
+        let mut stmt = self.conn.prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE (?1 = '' OR CAST(id AS TEXT) LIKE '%' || ?1 || '%' OR name LIKE '%' || ?1 || '%' COLLATE NOCASE OR client_name LIKE '%' || ?1 || '%' COLLATE NOCASE OR phone LIKE '%' || ?1 || '%' COLLATE NOCASE OR imei LIKE '%' || ?1 || '%' COLLATE NOCASE OR EXISTS (SELECT 1 FROM sale_items WHERE sale_id = sales.id AND (name LIKE '%' || ?1 || '%' COLLATE NOCASE OR imei LIKE '%' || ?1 || '%' COLLATE NOCASE))) ORDER BY id DESC LIMIT 500").unwrap();
         let rows = stmt
             .query_map([query], |r| {
                 Ok(Self::map_sale(
@@ -558,7 +720,9 @@ impl Database {
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
-                    r.get(13)?,
+                    r.get(13).unwrap_or(0.0),
+                    r.get(14).unwrap_or(0.0),
+                    r.get(15)?,
                 ))
             })
             .unwrap();
@@ -568,7 +732,7 @@ impl Database {
     pub fn get_sale_by_id(&self, id: i64) -> Option<Sale> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE id = ?1")
+            .prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE id = ?1")
             .ok()?;
         let mut sale: Sale = stmt
             .query_row([id], |r| {
@@ -586,13 +750,21 @@ impl Database {
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
-                    r.get(13)?,
+                    r.get(13).unwrap_or(0.0),
+                    r.get(14).unwrap_or(0.0),
+                    r.get(15)?,
                 ))
             })
             .ok()?;
         sale.items = self.get_items_for_sale(id);
         if sale.items.is_empty() {
-            // Venda anterior ao backfill: sintetiza 1 linha do cabeçalho.
+            // Venda anterior ao backfill: sintetiza 1 linha do cabeçalho,
+            // herdando a categoria da venda.
+            let item_type = if sale.sale_type == SaleType::Mista {
+                SaleType::Rapida
+            } else {
+                sale.sale_type
+            };
             sale.items.push(SaleItem {
                 id: 0,
                 sale_id: sale.id,
@@ -601,6 +773,7 @@ impl Database {
                 unit_price: sale.unit_price,
                 total_price: (sale.quantity as f64) * sale.unit_price,
                 imei: sale.imei.clone(),
+                item_type,
             });
         }
         Some(sale)
@@ -613,7 +786,7 @@ impl Database {
             Some(s) => s.as_str().to_string(),
             None => String::new(),
         };
-        let mut stmt = self.conn.prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE status != 'quitado' AND (?1 = '' OR status = ?1) AND (?2 = '' OR CAST(id AS TEXT) LIKE '%' || ?2 || '%' OR name LIKE '%' || ?2 || '%' COLLATE NOCASE OR client_name LIKE '%' || ?2 || '%' COLLATE NOCASE OR phone LIKE '%' || ?2 || '%' COLLATE NOCASE OR imei LIKE '%' || ?2 || '%' COLLATE NOCASE OR EXISTS (SELECT 1 FROM sale_items WHERE sale_id = sales.id AND (name LIKE '%' || ?2 || '%' COLLATE NOCASE OR imei LIKE '%' || ?2 || '%' COLLATE NOCASE))) ORDER BY id DESC LIMIT 500").unwrap();
+        let mut stmt = self.conn.prepare("SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE status != 'quitado' AND (?1 = '' OR status = ?1) AND (?2 = '' OR CAST(id AS TEXT) LIKE '%' || ?2 || '%' OR name LIKE '%' || ?2 || '%' COLLATE NOCASE OR client_name LIKE '%' || ?2 || '%' COLLATE NOCASE OR phone LIKE '%' || ?2 || '%' COLLATE NOCASE OR imei LIKE '%' || ?2 || '%' COLLATE NOCASE OR EXISTS (SELECT 1 FROM sale_items WHERE sale_id = sales.id AND (name LIKE '%' || ?2 || '%' COLLATE NOCASE OR imei LIKE '%' || ?2 || '%' COLLATE NOCASE))) ORDER BY id DESC LIMIT 500").unwrap();
         let rows = stmt
             .query_map(params![status_sql, query], |r| {
                 Ok(Self::map_sale(
@@ -630,7 +803,9 @@ impl Database {
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
-                    r.get(13)?,
+                    r.get(13).unwrap_or(0.0),
+                    r.get(14).unwrap_or(0.0),
+                    r.get(15)?,
                 ))
             })
             .unwrap();
@@ -638,24 +813,21 @@ impl Database {
     }
 
     /// Registra um abate no fiado: atualiza `paid_amount`/`status` da venda e
-    /// lança a entrada correspondente no caixa (dia atual). Atômico.
-    /// O meio de pagamento define o destino: Dinheiro → gaveta,
-    /// Cartão/Pix → banco. Retorna o novo saldo restante.
-    /// Falha se valor <= 0 ou maior que o restante.
-    pub fn register_abate_fiado(
+    /// lança a entrada correspondente no caixa (dia atual, gaveta). Atômico.
+    /// Retorna o novo saldo restante. Falha se valor <= 0 ou maior que o restante.
+    ///
+    /// Meio de pagamento removido: todo abate é Entrada na gaveta
+    /// (`CashSource::Drawer`); `CashSource` segue apenas para lançamentos
+    /// manuais de caixa. Descrição sem `(Dinheiro/Cartão/Pix)`.
+    pub fn register_abate_fiado_sem_meio(
         &mut self,
         sale_id: i64,
         amount: f64,
-        method: &PaymentMethod,
     ) -> Result<f64> {
         if !amount.is_finite() || amount <= 0.0 {
             anyhow::bail!("Abate must be greater than zero");
         }
-        // Roteamento caixa: só dinheiro físico alimenta a gaveta.
-        let source = match method {
-            PaymentMethod::Cash => CashSource::Drawer,
-            PaymentMethod::Card | PaymentMethod::Pix | PaymentMethod::Fiado => CashSource::Bank,
-        };
+        let source = CashSource::Drawer;
         let tx = self
             .conn
             .transaction()
@@ -682,14 +854,9 @@ impl Database {
         )?;
         let now = agora_local();
         let desc = if client.trim().is_empty() {
-            format!("Abate fiado #{} ({})", sale_id, method.label_ptbr())
+            format!("Abate fiado #{sale_id}")
         } else {
-            format!(
-                "Abate fiado #{} {} ({})",
-                sale_id,
-                client.trim(),
-                method.label_ptbr()
-            )
+            format!("Abate fiado #{sale_id} {}", client.trim())
         };
         tx.execute(
             "INSERT INTO cash_entries (amount, is_entry, source, description, created_at) VALUES (?1, 1, ?2, ?3, ?4)",
@@ -697,6 +864,18 @@ impl Database {
         )?;
         tx.commit().context("Failed to commit abatement")?;
         Ok((total - new_paid).max(0.0))
+    }
+
+    /// Shim de compatibilidade com a UI antiga (fase Egui pendente).
+    /// Ignora o meio e delega ao fluxo sem meio (sempre gaveta).
+    #[deprecated(note = "pagamento removido; use register_abate_fiado_sem_meio")]
+    pub fn register_abate_fiado(
+        &mut self,
+        sale_id: i64,
+        amount: f64,
+        _method: &PaymentMethod,
+    ) -> Result<f64> {
+        self.register_abate_fiado_sem_meio(sale_id, amount)
     }
 
     pub fn add_cash_entry(&mut self, entry: &NewCashEntry, source: &CashSource) -> Result<()> {
@@ -964,6 +1143,9 @@ impl Database {
         let row: rusqlite::Result<f64> = stmt.query_row([], |r| r.get(0));
         row.unwrap_or(0.0)
     }
+    /// Shim legado: meio removido; mantido para a UI antiga compilar.
+    /// Será excluído na fase Egui (relatórios passam a revenue-only).
+    #[deprecated(note = "pagamento removido dos relatórios")]
     pub fn total_sales_by_method(&self, method: &PaymentMethod) -> f64 {
         let pm = method.as_str();
         let mut stmt = self
@@ -1238,8 +1420,11 @@ impl Database {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    /// Recebido no ato em dinheiro: meio removido, todas as vendas novas
+    /// gravam `'Cash'` fixo, logo equivale a `total_initial_received()`.
+    /// Mantido para o cálculo da gaveta até a limpeza final dos shims.
     pub fn total_cash_sales(&self) -> f64 {
-        self.total_initial_received_by_method(&PaymentMethod::Cash)
+        self.total_initial_received()
     }
 
     pub fn total_cash_sales_for_day(&self, day: &str) -> f64 {
@@ -1445,7 +1630,9 @@ impl Database {
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
-                    r.get(13)?,
+                    r.get(13).unwrap_or(0.0),
+                    r.get(14).unwrap_or(0.0),
+                    r.get(15)?,
                 ))
             })
             .unwrap();
@@ -1454,21 +1641,21 @@ impl Database {
 
     pub fn get_sales_for_day(&self, day: &str) -> Vec<Sale> {
         self.sales_in_period(
-            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE strftime('%Y-%m-%d', created_at) = ?1 ORDER BY id DESC LIMIT 500",
+            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE strftime('%Y-%m-%d', created_at) = ?1 ORDER BY id DESC LIMIT 500",
             day,
         )
     }
 
     pub fn get_sales_for_month(&self, year_month: &str) -> Vec<Sale> {
         self.sales_in_period(
-            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE strftime('%Y-%m', created_at) = ?1 ORDER BY id DESC LIMIT 500",
+            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE strftime('%Y-%m', created_at) = ?1 ORDER BY id DESC LIMIT 500",
             year_month,
         )
     }
 
     pub fn get_sales_for_year(&self, year: &str) -> Vec<Sale> {
         self.sales_in_period(
-            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, created_at FROM sales WHERE strftime('%Y', created_at) = ?1 ORDER BY id DESC LIMIT 500",
+            "SELECT id, name, quantity, unit_price, total_price, payment_method, paid_amount, client_name, phone, imei, sale_type, item_count, status, valor_recebido, troco, created_at FROM sales WHERE strftime('%Y', created_at) = ?1 ORDER BY id DESC LIMIT 500",
             year,
         )
     }
@@ -1480,8 +1667,9 @@ impl Database {
     /// somando quantidade e faturamento. Sub-modelos distintos
     /// ("iPhone 12" vs "iPhone 12 Pro Max") nunca colapsam, pois os
     /// modificadores literais permanecem na chave de agrupamento.
-    /// `sale_type` (`None` = Todos) filtra pela categoria da venda de
-    /// origem (`sales.sale_type`); `None` agrega todas as categorias.
+    /// `sale_type` (`None` = Todos) filtra pela categoria DA LINHA
+    /// (`sale_items.item_type`); `Some(Mista)` filtra vendas de cabeçalho
+    /// misto (`sales.sale_type = 'mista'`); `None` agrega tudo.
     ///
     /// # Erros
     ///
@@ -1492,12 +1680,18 @@ impl Database {
         end_date: &str,
         sale_type: Option<SaleType>,
     ) -> Result<Vec<ItemSalesSummary>> {
-        let filter = sale_type.map_or_else(String::new, |t| t.as_str().to_string());
+        // `Mista` como filtro = vendas mistas (cabeçalho); demais tipos =
+        // categoria da linha. `None` = todas.
+        let (item_filter, sale_filter) = match sale_type {
+            None => (String::new(), String::new()),
+            Some(SaleType::Mista) => (String::new(), SaleType::Mista.as_str().to_string()),
+            Some(t) => (t.as_str().to_string(), String::new()),
+        };
         let mut stmt = self.conn.prepare(
-            "SELECT MIN(TRIM(si.name)) AS name, SUM(si.quantity) AS total_quantity, SUM(si.total_price) AS total_revenue, COUNT(DISTINCT s.id) AS sales_count FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE strftime('%Y-%m-%d', s.created_at) BETWEEN ?1 AND ?2 AND (?3 = '' OR s.sale_type = ?3) GROUP BY LOWER(TRIM(si.name)) ORDER BY total_quantity DESC",
+            "SELECT MIN(TRIM(si.name)) AS name, SUM(si.quantity) AS total_quantity, SUM(si.total_price) AS total_revenue, COUNT(DISTINCT s.id) AS sales_count FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE strftime('%Y-%m-%d', s.created_at) BETWEEN ?1 AND ?2 AND (?3 = '' OR si.item_type = ?3) AND (?4 = '' OR s.sale_type = ?4) GROUP BY LOWER(TRIM(si.name)) ORDER BY total_quantity DESC",
         )?;
         let rows = stmt
-            .query_map(params![start_date, end_date, filter], |r| {
+            .query_map(params![start_date, end_date, item_filter, sale_filter], |r| {
                 Ok(ItemSalesSummary {
                     name: r.get(0)?,
                     total_quantity: r.get(1)?,
@@ -1545,6 +1739,8 @@ impl Database {
         )
     }
 
+    /// Shim legado (pagamento removido). Será excluído na fase Egui.
+    #[deprecated(note = "pagamento removido dos relatórios")]
     pub fn total_received_by_method(&self, method: &PaymentMethod) -> f64 {
         let pm = method.as_str();
         let mut stmt = self
@@ -1587,6 +1783,8 @@ impl Database {
         )
     }
 
+    /// Shim legado (pagamento removido). Será excluído na fase Egui.
+    #[deprecated(note = "pagamento removido dos relatórios")]
     pub fn total_initial_received_by_method(&self, method: &PaymentMethod) -> f64 {
         let pm = method.as_str();
         let mut stmt = self
@@ -1690,12 +1888,20 @@ mod tests {
         tipo: SaleType,
         fiado: bool,
     ) -> NewSale {
+        // `tipo` agora é a categoria da linha; o cabeçalho é derivado.
+        // `Mista` como categoria de linha é inválida — testes usam tipos reais.
+        let item_tipo = if tipo == SaleType::Mista {
+            SaleType::Rapida
+        } else {
+            tipo
+        };
         NewSale {
             items: vec![NewSaleItem {
                 name: nome.to_string(),
                 quantity: "1".to_string(),
                 unit_price: total_unit.to_string(),
                 imei: imei.to_string(),
+                item_type: item_tipo,
             }],
             payment_method: metodo,
             client_name: cliente.to_string(),
@@ -1703,10 +1909,14 @@ mod tests {
             sale_type: tipo,
             paid_amount: pago.to_string(),
             is_fiado: fiado,
+            valor_recebido: String::new(),
         }
     }
 
     /// Rascunho multi-item: cada tupla é (nome, qtd, unitário, imei).
+    /// Todas as linhas herdam `tipo` como categoria (testes single-tipo);
+    /// para carrinho misto real, montar `NewSale` manualmente (ver teste
+    /// `carrinho_misto_servico_acessorio_aparelho`).
     #[allow(clippy::too_many_arguments)]
     fn nova_venda_itens(
         itens: Vec<(&str, &str, &str, &str)>,
@@ -1717,6 +1927,11 @@ mod tests {
         tipo: SaleType,
         fiado: bool,
     ) -> NewSale {
+        let item_tipo = if tipo == SaleType::Mista {
+            SaleType::Rapida
+        } else {
+            tipo
+        };
         NewSale {
             items: itens
                 .into_iter()
@@ -1725,6 +1940,7 @@ mod tests {
                     quantity: qtd.to_string(),
                     unit_price: unit.to_string(),
                     imei: imei.to_string(),
+                    item_type: item_tipo,
                 })
                 .collect(),
             payment_method: metodo,
@@ -1733,6 +1949,38 @@ mod tests {
             sale_type: tipo,
             paid_amount: pago.to_string(),
             is_fiado: fiado,
+            valor_recebido: String::new(),
+        }
+    }
+
+    /// Rascunho multi-categoria: cada tupla é (nome, qtd, unitário, imei, tipo).
+    /// O cabeçalho `sale_type` é ignorado por `add_sale` (derivado das linhas).
+    #[allow(clippy::too_many_arguments)]
+    fn nova_venda_mista(
+        itens: Vec<(&str, &str, &str, &str, SaleType)>,
+        pago: &str,
+        cliente: &str,
+        telefone: &str,
+        fiado: bool,
+    ) -> NewSale {
+        NewSale {
+            items: itens
+                .into_iter()
+                .map(|(nome, qtd, unit, imei, tipo)| NewSaleItem {
+                    name: nome.to_string(),
+                    quantity: qtd.to_string(),
+                    unit_price: unit.to_string(),
+                    imei: imei.to_string(),
+                    item_type: tipo,
+                })
+                .collect(),
+            payment_method: None,
+            client_name: cliente.to_string(),
+            phone: telefone.to_string(),
+            sale_type: SaleType::Mista,
+            paid_amount: pago.to_string(),
+            is_fiado: fiado,
+            valor_recebido: String::new(),
         }
     }
 
@@ -2027,7 +2275,7 @@ mod tests {
         let sale = db.get_pending_debts("Ana", None).pop().expect("dívida");
         let caixa_antes = db.total_cash_in_for_day(&crate::models::hoje_local());
         let restante = db
-            .register_abate_fiado(sale.id, 120.0, &PaymentMethod::Cash)
+            .register_abate_fiado_sem_meio(sale.id, 120.0)
             .expect("abate parcial");
         assert!(quase_igual(restante, 180.0));
         assert!(quase_igual(db.total_receivables_global(), 180.0));
@@ -2037,7 +2285,7 @@ mod tests {
         ));
         // Abate final quita e zera o global.
         let restante = db
-            .register_abate_fiado(sale.id, 180.0, &PaymentMethod::Cash)
+            .register_abate_fiado_sem_meio(sale.id, 180.0)
             .expect("quitação");
         assert!(quase_igual(restante, 0.0));
         assert!(quase_igual(db.total_receivables_global(), 0.0));
@@ -2053,15 +2301,15 @@ mod tests {
         db.add_sale(&v).expect("parcial");
         let sale = db.get_pending_debts("Bia", None).pop().expect("dívida");
         assert!(
-            db.register_abate_fiado(sale.id, 151.0, &PaymentMethod::Cash)
+            db.register_abate_fiado_sem_meio(sale.id, 151.0)
                 .is_err()
         );
         assert!(
-            db.register_abate_fiado(sale.id, 0.0, &PaymentMethod::Cash)
+            db.register_abate_fiado_sem_meio(sale.id, 0.0)
                 .is_err()
         );
         assert!(
-            db.register_abate_fiado(99999, 10.0, &PaymentMethod::Cash)
+            db.register_abate_fiado_sem_meio(99999, 10.0)
                 .is_err()
         );
         // Nada mudou: pago continua 50, restante 150, sem entrada no caixa.
@@ -2073,6 +2321,7 @@ mod tests {
 
     #[test]
     fn abate_pix_vai_para_banco_nao_para_gaveta() {
+        // Legado renomeado: meio removido — todo abate é Entrada na gaveta.
         let mut db = banco_teste();
         let v = nova_venda(
             "Manutenção",
@@ -2086,31 +2335,30 @@ mod tests {
         let sale = db.get_pending_debts("Rui", None).pop().expect("dívida");
         let hoje = crate::models::hoje_local();
         let restante = db
-            .register_abate_fiado(sale.id, 120.0, &PaymentMethod::Pix)
-            .expect("abate via Pix");
+            .register_abate_fiado_sem_meio(sale.id, 120.0)
+            .expect("abate");
         assert!(quase_igual(restante, 180.0));
         assert!(quase_igual(db.total_receivables_global(), 180.0));
-        // Roteamento: banco +120, gaveta zerada.
+        // Roteamento novo: gaveta +120, banco zerado, sem rótulo de meio.
         assert!(quase_igual(
-            db.total_cash_in_by_source_for_day(&CashSource::Bank, &hoje),
+            db.total_cash_in_by_source_for_day(&CashSource::Drawer, &hoje),
             120.0
         ));
         assert!(quase_igual(
-            db.total_cash_in_by_source_for_day(&CashSource::Drawer, &hoje),
+            db.total_cash_in_by_source_for_day(&CashSource::Bank, &hoje),
             0.0
         ));
-        assert!(quase_igual(db.cash_in_drawer_for_day(&hoje), 0.0));
-        // Log descritivo com o meio em PT-BR.
+        assert!(quase_igual(db.cash_in_drawer_for_day(&hoje), 120.0));
         let entradas = db.get_cash_entries_for_day(&hoje);
         assert_eq!(entradas.len(), 1);
-        assert!(entradas[0].description.contains("(Pix)"));
+        assert!(!entradas[0].description.contains("(Pix)"));
         assert!(entradas[0].description.contains(&sale.id.to_string()));
-        // Abate em dinheiro vai para a gaveta.
-        db.register_abate_fiado(sale.id, 80.0, &PaymentMethod::Cash)
-            .expect("abate em dinheiro");
+        // Segundo abate soma na gaveta.
+        db.register_abate_fiado_sem_meio(sale.id, 80.0)
+            .expect("segundo abate");
         assert!(quase_igual(
             db.total_cash_in_by_source_for_day(&CashSource::Drawer, &hoje),
-            80.0
+            200.0
         ));
         assert!(quase_igual(db.total_receivables_global(), 100.0));
     }
@@ -2192,7 +2440,7 @@ mod tests {
         );
         db.add_sale(&v).expect("pendente");
         let sale = db.get_pending_debts("Ana", None).pop().expect("dívida");
-        db.register_abate_fiado(sale.id, 50.0, &PaymentMethod::Cash)
+        db.register_abate_fiado_sem_meio(sale.id, 50.0)
             .expect("abate 50 em dinheiro");
         // Vendas em dinheiro: só o ato (0), nunca o abate.
         assert!(quase_igual(db.total_cash_sales(), 0.0));
@@ -2215,7 +2463,7 @@ mod tests {
         );
         db.add_sale(&v2).expect("parcial");
         let sale2 = db.get_pending_debts("Bia", None).pop().expect("dívida");
-        db.register_abate_fiado(sale2.id, 50.0, &PaymentMethod::Cash)
+        db.register_abate_fiado_sem_meio(sale2.id, 50.0)
             .expect("abate parcial");
         assert!(quase_igual(db.total_cash_sales(), 100.0));
         assert!(quase_igual(db.cash_in_drawer(), 200.0));
@@ -2331,21 +2579,20 @@ mod tests {
     #[test]
     fn multi_item_aparelho_soma_totais_e_resumo() {
         let mut db = banco_teste();
-        // Aparelho + acessório: IMEI só no item #1.
-        let v = nova_venda_itens(
+        // Aparelho + acessório multi-categoria: IMEI só no item Aparelho.
+        let v = nova_venda_mista(
             vec![
-                ("iPhone 12", "1", "2500", "355123456789012"),
-                ("Capinha - Silicone", "2", "40", ""),
+                ("iPhone 12", "1", "2500", "355123456789012", SaleType::Aparelho),
+                ("Capinha - Silicone", "2", "40", "", SaleType::Rapida),
             ],
-            Some(PaymentMethod::Pix),
             "",
             "Ana",
             "11988887777",
-            SaleType::Aparelho,
             false,
         );
         let id = db.add_sale(&v).expect("multi-item válido");
         let sale = db.get_sale_by_id(id).expect("venda");
+        assert_eq!(sale.sale_type, SaleType::Mista);
         assert!(quase_igual(sale.total_price, 2580.0));
         assert_eq!(sale.name, "iPhone 12 (+1 item)");
         assert_eq!(sale.quantity, 3);
@@ -2356,26 +2603,26 @@ mod tests {
         assert_eq!(sale.items[0].quantity, 1);
         assert!(quase_igual(sale.items[0].total_price, 2500.0));
         assert_eq!(sale.items[0].imei, "355123456789012");
+        assert_eq!(sale.items[0].item_type, SaleType::Aparelho);
         assert_eq!(sale.items[1].name, "Capinha - Silicone");
         assert_eq!(sale.items[1].quantity, 2);
         assert!(quase_igual(sale.items[1].total_price, 80.0));
         assert_eq!(sale.items[1].imei, "");
+        assert_eq!(sale.items[1].item_type, SaleType::Rapida);
         assert!(quase_igual(db.total_sales(), 2580.0));
     }
 
     #[test]
     fn multi_item_busca_alcanca_segundo_item() {
         let mut db = banco_teste();
-        let v = nova_venda_itens(
+        let v = nova_venda_mista(
             vec![
-                ("iPhone 12", "1", "2500", "355123456789012"),
-                ("Película - 3D", "1", "50", ""),
+                ("iPhone 12", "1", "2500", "355123456789012", SaleType::Aparelho),
+                ("Película - 3D", "1", "50", "", SaleType::Rapida),
             ],
-            Some(PaymentMethod::Cash),
             "",
             "Bia",
             "",
-            SaleType::Aparelho,
             false,
         );
         db.add_sale(&v).expect("multi-item");
@@ -2387,33 +2634,144 @@ mod tests {
     }
 
     #[test]
-    fn aparelho_exige_imei_apenas_no_primeiro_item() {
+    fn aparelho_exige_imei_por_linha() {
         let mut db = banco_teste();
-        // Item #1 sem IMEI falha, mesmo com o #2 preenchido.
-        let v = nova_venda_itens(
-            vec![("iPhone 12", "1", "2500", ""), ("Capinha", "1", "40", "X")],
-            Some(PaymentMethod::Pix),
+        // Aparelho sem IMEI falha, mesmo com acessório preenchido.
+        let v = nova_venda_mista(
+            vec![
+                ("iPhone 12", "1", "2500", "", SaleType::Aparelho),
+                ("Capinha", "1", "40", "", SaleType::Rapida),
+            ],
             "",
             "Ana",
             "",
-            SaleType::Aparelho,
             false,
         );
         assert!(db.add_sale(&v).is_err());
-        // Item #1 com IMEI + extra sem IMEI passa.
-        let v = nova_venda_itens(
+        // Aparelho com IMEI + acessório sem IMEI passa.
+        let v = nova_venda_mista(
             vec![
-                ("iPhone 12", "1", "2500", "355123456789012"),
-                ("Capinha", "1", "40", ""),
+                ("iPhone 12", "1", "2500", "355123456789012", SaleType::Aparelho),
+                ("Capinha", "1", "40", "", SaleType::Rapida),
             ],
-            Some(PaymentMethod::Pix),
             "",
             "Ana",
             "",
-            SaleType::Aparelho,
             false,
         );
         assert!(db.add_sale(&v).is_ok());
+        // Segundo aparelho sem IMEI também falha (regra por-linha).
+        let v = nova_venda_mista(
+            vec![
+                ("iPhone 12", "1", "2500", "355123456789012", SaleType::Aparelho),
+                ("iPhone 13", "1", "3000", "", SaleType::Aparelho),
+            ],
+            "",
+            "Ana",
+            "",
+            false,
+        );
+        assert!(db.add_sale(&v).is_err());
+    }
+
+    #[test]
+    fn carrinho_misto_servico_acessorio_aparelho() {
+        let mut db = banco_teste();
+        // Serviço + acessório + aparelho no mesmo carrinho.
+        let v = nova_venda_mista(
+            vec![
+                ("Troca de tela", "1", "300", "", SaleType::Servico),
+                ("Capinha", "1", "40", "", SaleType::Rapida),
+                ("iPhone 12", "1", "2500", "355123456789012", SaleType::Aparelho),
+            ],
+            "",
+            "Carlos",
+            "11999990000",
+            false,
+        );
+        let id = db.add_sale(&v).expect("carrinho misto válido");
+        let sale = db.get_sale_by_id(id).expect("venda");
+        assert_eq!(sale.sale_type, SaleType::Mista);
+        assert!(quase_igual(sale.total_price, 2840.0));
+        assert_eq!(sale.item_count, 3);
+        assert_eq!(sale.items.len(), 3);
+        assert_eq!(sale.items[0].item_type, SaleType::Servico);
+        assert_eq!(sale.items[1].item_type, SaleType::Rapida);
+        assert_eq!(sale.items[2].item_type, SaleType::Aparelho);
+        // Misto exige cliente (garantia): sem cliente falha.
+        let sem_cliente = nova_venda_mista(
+            vec![
+                ("Troca de tela", "1", "300", "", SaleType::Servico),
+                ("Capinha", "1", "40", "", SaleType::Rapida),
+            ],
+            "",
+            "",
+            "",
+            false,
+        );
+        assert!(db.add_sale(&sem_cliente).is_err());
+    }
+
+    #[test]
+    fn troco_caixa_soma_total_nao_recebido() {
+        let mut db = banco_teste();
+        // Venda 560, recebido 600 → troco 40, caixa soma 560.
+        let mut v = nova_venda("Peça", "560", None, "", "", false);
+        v.valor_recebido = "600".to_string();
+        let id = db.add_sale(&v).expect("venda com troco");
+        let sale = db.get_sale_by_id(id).expect("venda");
+        assert!(quase_igual(sale.total_price, 560.0));
+        assert!(quase_igual(sale.paid_amount, 560.0));
+        assert!(quase_igual(sale.valor_recebido, 600.0));
+        assert!(quase_igual(sale.troco, 40.0));
+        assert_eq!(sale.status, SaleStatus::Quitado);
+        // Caixa: exatamente o total, nunca o recebido.
+        assert!(quase_igual(db.total_initial_received(), 560.0));
+        assert!(quase_igual(db.total_sales(), 560.0));
+        assert!(quase_igual(db.net_balance_global(), 560.0));
+        assert!(quase_igual(db.cash_in_drawer(), 560.0));
+    }
+
+    #[test]
+    fn troco_zero_quando_recebido_vazio_ou_exato() {
+        let mut db = banco_teste();
+        // Vazio = exato.
+        let v = nova_venda("A", "100", None, "", "", false);
+        let id = db.add_sale(&v).expect("venda exata");
+        let sale = db.get_sale_by_id(id).expect("venda");
+        assert!(quase_igual(sale.valor_recebido, 100.0));
+        assert!(quase_igual(sale.troco, 0.0));
+        // Exato explícito.
+        let mut v2 = nova_venda("B", "200", None, "", "", false);
+        v2.valor_recebido = "200".to_string();
+        let id2 = db.add_sale(&v2).expect("venda exata explícita");
+        let sale2 = db.get_sale_by_id(id2).expect("venda");
+        assert!(quase_igual(sale2.troco, 0.0));
+        assert!(quase_igual(db.total_initial_received(), 300.0));
+    }
+
+    #[test]
+    fn recebido_menor_que_total_falha() {
+        let mut db = banco_teste();
+        let mut v = nova_venda("Peça", "560", None, "", "", false);
+        v.valor_recebido = "500".to_string();
+        assert!(db.add_sale(&v).is_err());
+        assert_eq!(db.count_sales(), 0);
+    }
+
+    #[test]
+    fn fiado_ignora_valor_recebido() {
+        let mut db = banco_teste();
+        // Fiado pendente: recebido vai para paid_amount vazio (=0); o campo
+        // display-only valor_recebido é ignorado, troco sempre 0.
+        let mut v = nova_venda("Fiado", "300", None, "", "Rui", true);
+        v.valor_recebido = "500".to_string();
+        let id = db.add_sale(&v).expect("fiado");
+        let sale = db.get_sale_by_id(id).expect("venda");
+        assert_eq!(sale.status, SaleStatus::Pendente);
+        assert!(quase_igual(sale.paid_amount, 0.0));
+        assert!(quase_igual(sale.troco, 0.0));
+        assert!(quase_igual(db.total_initial_received(), 0.0));
     }
 
     #[test]
@@ -2594,16 +2952,14 @@ mod tests {
     #[test]
     fn excluir_venda_remove_linhas_e_abate_metricas() {
         let mut db = banco_teste();
-        let v = nova_venda_itens(
+        let v = nova_venda_mista(
             vec![
-                ("iPhone 12", "1", "2500", "IMEI1"),
-                ("Capinha", "1", "40", ""),
+                ("iPhone 12", "1", "2500", "IMEI1", SaleType::Aparelho),
+                ("Capinha", "1", "40", "", SaleType::Rapida),
             ],
-            Some(PaymentMethod::Cash),
             "",
             "Ana",
             "",
-            SaleType::Aparelho,
             false,
         );
         let id = db.add_sale(&v).expect("multi-item");
@@ -2632,7 +2988,7 @@ mod tests {
         );
         db.add_sale(&v).expect("pendente");
         let sale = db.get_pending_debts("Rui", None).pop().expect("dívida");
-        db.register_abate_fiado(sale.id, 120.0, &PaymentMethod::Cash)
+        db.register_abate_fiado_sem_meio(sale.id, 120.0)
             .expect("abate");
         assert!(quase_igual(db.total_receivables_global(), 180.0));
         let caixa_antes = db.total_cash_in();
@@ -2680,8 +3036,8 @@ mod tests {
             .expect("limpar backfill");
         db.conn
             .execute(
-                "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, position) VALUES (?1, ?2, ?3, ?4, ?5, '', 0)",
-                params![sale_id, item_nome, qtd, unit, qtd as f64 * unit],
+                "INSERT INTO sale_items (sale_id, name, quantity, unit_price, total_price, imei, item_type, position) VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, 0)",
+                params![sale_id, item_nome, qtd, unit, qtd as f64 * unit, tipo.as_str()],
             )
             .expect("inserir item de teste");
     }
@@ -2988,5 +3344,87 @@ mod tests {
             .get_aggregated_item_sales("2026-10-01", "2026-10-31", Some(SaleType::Servico))
             .expect("serviço vazio");
         assert!(sv.is_empty());
+    }
+
+    #[test]
+    fn acessorio_em_venda_mista_agrega_por_linha() {
+        // Cenário real do carrinho misto: cabeçalho `Mista` com Aparelho +
+        // Acessório + Serviço, mais uma segunda venda onde "Capinha" sai
+        // como linha de Aparelho (bundle). O filtro por categoria isola
+        // pela LINHA (`si.item_type`); "Todos" soma tudo.
+        let mut db = banco_teste();
+        let mista = nova_venda_mista(
+            vec![
+                ("iPhone 12", "1", "2500", "IMEI1", SaleType::Aparelho),
+                ("Capinha", "2", "40", "", SaleType::Rapida),
+                ("Troca de tela", "1", "300", "", SaleType::Servico),
+            ],
+            "",
+            "Carlos",
+            "",
+            false,
+        );
+        let id = db.add_sale(&mista).expect("mista válida");
+        assert_eq!(
+            db.get_sale_by_id(id).expect("venda").sale_type,
+            SaleType::Mista
+        );
+        // Move a mista para dentro da janela de outubro (add_sale carimba hoje).
+        db.conn
+            .execute(
+                "UPDATE sales SET created_at = '2026-10-05 10:00:00' WHERE id = ?1",
+                params![id],
+            )
+            .expect("retroagir venda");
+        let bundle = nova_venda_mista(
+            vec![("Capinha", "1", "40", "IMEI2", SaleType::Aparelho)],
+            "",
+            "Ana",
+            "",
+            false,
+        );
+        let id2 = db.add_sale(&bundle).expect("bundle válido");
+        db.conn
+            .execute(
+                "UPDATE sales SET created_at = '2026-10-06 10:00:00' WHERE id = ?1",
+                params![id2],
+            )
+            .expect("retroagir venda");
+        // Acessórios: só a linha Rapida da mista (qtd 2, 1 venda).
+        let rp = db
+            .get_aggregated_item_sales("2026-10-01", "2026-10-31", Some(SaleType::Rapida))
+            .expect("acessórios");
+        assert_eq!(resumo_por_nome(&rp, "Capinha").total_quantity, 2);
+        assert!(quase_igual(
+            resumo_por_nome(&rp, "Capinha").total_revenue,
+            80.0
+        ));
+        assert_eq!(resumo_por_nome(&rp, "Capinha").sales_count, 1);
+        // Aparelhos: iPhone + Capinha do bundle, ainda distintos.
+        let ap = db
+            .get_aggregated_item_sales("2026-10-01", "2026-10-31", Some(SaleType::Aparelho))
+            .expect("aparelhos");
+        assert_eq!(ap.len(), 2);
+        assert_eq!(resumo_por_nome(&ap, "iPhone 12").total_quantity, 1);
+        assert_eq!(resumo_por_nome(&ap, "Capinha").total_quantity, 1);
+        // Serviços: só a troca de tela da mista.
+        let sv = db
+            .get_aggregated_item_sales("2026-10-01", "2026-10-31", Some(SaleType::Servico))
+            .expect("serviços");
+        assert_eq!(sv.len(), 1);
+        assert_eq!(
+            resumo_por_nome(&sv, "Troca de tela").total_quantity,
+            1
+        );
+        // Todos: mesmo nome em 2 categorias soma (2 + 1 = 3, 2 vendas).
+        let todos = db
+            .get_aggregated_item_sales("2026-10-01", "2026-10-31", None)
+            .expect("todos");
+        assert_eq!(resumo_por_nome(&todos, "Capinha").total_quantity, 3);
+        assert!(quase_igual(
+            resumo_por_nome(&todos, "Capinha").total_revenue,
+            120.0
+        ));
+        assert_eq!(resumo_por_nome(&todos, "Capinha").sales_count, 2);
     }
 }

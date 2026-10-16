@@ -532,7 +532,7 @@ fn nav_targets() -> [(&'static str, &'static str); 5] {
     [
         ("📊", "Painel Geral"),
         ("🛒", "Vendas (PDV)"),
-        ("💰", "Controle de Caixa"),
+        ("💰", "Fluxo Financeiro"),
         ("📒", "Fiado / Recebíveis"),
         ("📈", "Relatórios"),
     ]
@@ -653,17 +653,26 @@ fn render_sidebar_contents(ui: &mut egui::Ui, app: &mut App) {
     ui.add_space(8.0);
 }
 
+/// Moeda BR com milhar (`R$ 13.830,00`) para TODA a UI.
+/// Recibo/CSV usam `export::fmt_valor_br` (sem `R$`/milhar, correto p/
+/// impressão e Excel); aqui o operador lê valores de caixa/PDV.
 fn fmt_money(v: f64) -> String {
-    format!("R$ {v:.2}")
-}
-
-fn translate_payment(method: &models::PaymentMethod) -> &str {
-    match method {
-        models::PaymentMethod::Cash => "Dinheiro",
-        models::PaymentMethod::Card => "Cartão",
-        models::PaymentMethod::Pix => "Pix",
-        models::PaymentMethod::Fiado => "Fiado",
+    let base = format!("{:.2}", v);
+    let (sinal, digitos) = base
+        .strip_prefix('-')
+        .map_or(("", base.as_str()), |r| ("-", r));
+    let mut partes = digitos.splitn(2, '.');
+    let inteiros = partes.next().unwrap_or("0");
+    let centavos = partes.next().unwrap_or("00");
+    let chars: Vec<char> = inteiros.chars().collect();
+    let mut grupo = String::with_capacity(inteiros.len() + 2);
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
+            grupo.push('.');
+        }
+        grupo.push(*c);
     }
+    format!("R$ {sinal}{grupo},{centavos}")
 }
 
 fn status_label(status: &models::SaleStatus) -> &'static str {
@@ -676,10 +685,6 @@ fn status_color(status: &models::SaleStatus) -> Color32 {
         models::SaleStatus::Parcial => ds::AMBER,
         models::SaleStatus::Pendente => ds::CORAL,
     }
-}
-
-fn source_label(source: &models::CashSource) -> &str {
-    source.short_label()
 }
 
 fn format_datetime_br(s: &str) -> String {
@@ -1068,7 +1073,7 @@ fn sales_table(ui: &mut egui::Ui, sales: &[models::Sale]) -> Option<SaleRowActio
                             ui.add(egui::Label::new(table_header_label("Total")).wrap());
                         });
                         header.col(|ui| {
-                            ui.add(egui::Label::new(table_header_label("Pagamento")).wrap());
+                            ui.add(egui::Label::new(table_header_label("Tipo")).wrap());
                         });
                         header.col(|ui| {
                             ui.add(egui::Label::new(table_header_label("Situação")).wrap());
@@ -1124,7 +1129,7 @@ fn sales_table(ui: &mut egui::Ui, sales: &[models::Sale]) -> Option<SaleRowActio
                                 row.col(|ui| {
                                     ui.add(
                                         egui::Label::new(table_cell(
-                                            translate_payment(&s.payment_method).to_string(),
+                                            s.sale_type.label_ptbr().to_string(),
                                         ))
                                         .wrap(),
                                     );
@@ -1202,7 +1207,6 @@ fn cash_table(ui: &mut egui::Ui, entries: &[models::MovimentoCaixa]) {
                     .column(Column::initial(116.0).clip(true))
                     .column(Column::initial(96.0).clip(true))
                     .column(Column::initial(TABLE_DESC_COL_W).clip(true))
-                    .column(Column::initial(96.0).clip(true))
                     .column(Column::initial(136.0).clip(true))
                     .header(32.0, |mut h| {
                         h.col(|ui| {
@@ -1216,9 +1220,6 @@ fn cash_table(ui: &mut egui::Ui, entries: &[models::MovimentoCaixa]) {
                         });
                         h.col(|ui| {
                             ui.add(egui::Label::new(table_header_label("Descrição")).wrap());
-                        });
-                        h.col(|ui| {
-                            ui.add(egui::Label::new(table_header_label("Origem")).wrap());
                         });
                         h.col(|ui| {
                             ui.add(egui::Label::new(table_header_label("Data/Hora")).wrap());
@@ -1272,14 +1273,6 @@ fn cash_table(ui: &mut egui::Ui, entries: &[models::MovimentoCaixa]) {
                                 });
                                 row.col(|ui| {
                                     ui.add(
-                                        egui::Label::new(table_cell(
-                                            source_label(&e.source).to_string(),
-                                        ))
-                                        .wrap(),
-                                    );
-                                });
-                                row.col(|ui| {
-                                    ui.add(
                                         egui::Label::new(table_cell(format_datetime_br(
                                             &e.created_at,
                                         )))
@@ -1306,7 +1299,7 @@ fn loss_table_inner(
         empty_state_flat(
             ui,
             "Nenhuma perda registrada",
-            "Que ótimo — quando houver uma perda, ela aparece aqui com origem e data.",
+            "Que ótimo — quando houver uma perda, ela aparece aqui com valor e data.",
         );
         return;
     }
@@ -1324,7 +1317,6 @@ fn loss_table_inner(
                 .column(Column::initial(56.0).clip(true))
                 .column(Column::initial(116.0).clip(true))
                 .column(Column::initial(TABLE_DESC_COL_W).clip(true))
-                .column(Column::initial(96.0).clip(true))
                 .column(Column::initial(136.0).clip(true))
                 .header(32.0, |mut h| {
                     h.col(|ui| {
@@ -1335,9 +1327,6 @@ fn loss_table_inner(
                     });
                     h.col(|ui| {
                         ui.add(egui::Label::new(table_header_label("Descrição")).wrap());
-                    });
-                    h.col(|ui| {
-                        ui.add(egui::Label::new(table_header_label("Origem")).wrap());
                     });
                     h.col(|ui| {
                         ui.add(egui::Label::new(table_header_label("Data/Hora")).wrap());
@@ -1363,14 +1352,6 @@ fn loss_table_inner(
                             row.col(|ui| {
                                 ui.add(
                                     egui::Label::new(table_cell(l.description.clone())).truncate(),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.add(
-                                    egui::Label::new(table_cell(
-                                        source_label(&l.source).to_string(),
-                                    ))
-                                    .wrap(),
                                 );
                             });
                             row.col(|ui| {
@@ -1941,69 +1922,9 @@ fn kpi_grid(ui: &mut egui::Ui, max_cols: usize, cards: &[(&str, String, Color32)
     });
 }
 
-/// Seletor do tipo de atendimento (Venda Rápida / Serviço / Aparelho).
-/// Reusa o padrão visual da barra de pagamento: selecionado em destaque
-/// esmeralda, 44px de altura mínima, ramo fluido wide / empilhado narrow.
-fn sale_type_selector(
-    ui: &mut egui::Ui,
-    sale_type: &mut models::SaleType,
-    sale_error: &mut String,
-) {
-    use models::SaleType;
-    const OPTIONS: [(SaleType, &str); 3] = [
-        (SaleType::Rapida, "⚡ Venda Rápida"),
-        (SaleType::Servico, "🔧 Serviço"),
-        (SaleType::Aparelho, "📱 Aparelho"),
-    ];
-    let button = |selected: bool, label: &str, w: f32| {
-        let mut btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong())
-            .selected(selected)
-            .rounding(Rounding::same(8.0))
-            .min_size(Vec2::new(w, 44.0));
-        if selected {
-            btn = btn
-                .fill(ds::EMERALD_SOFT_BG)
-                .stroke(egui::Stroke::new(1.5, ds::EMERALD));
-        } else {
-            btn = btn
-                .fill(ds::INPUT_BG)
-                .stroke(egui::Stroke::new(1.0, ds::BORDER));
-        }
-        btn
-    };
-    if is_wide_hysteresis(ui, "pos_type", 560.0) {
-        let btn_w = fluid_button_width(ui.available_width(), 3, 8.0, 130.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            for (variant, label) in OPTIONS {
-                let selected = *sale_type == variant;
-                if ui.add(button(selected, label, btn_w)).clicked() && !selected {
-                    *sale_type = variant;
-                    sale_error.clear();
-                }
-            }
-        });
-    } else {
-        ui.vertical(|ui| {
-            for (variant, label) in OPTIONS {
-                let selected = *sale_type == variant;
-                if ui
-                    .add(button(selected, label, ui.available_width()))
-                    .clicked()
-                    && !selected
-                {
-                    *sale_type = variant;
-                    sale_error.clear();
-                }
-                ui.add_space(8.0);
-            }
-        });
-    }
-}
-
 /// Impressão digital do rascunho do PDV (anti-vazamento do recibo).
-/// Qualquer edição — texto, tipo, pagamento ou fiado — muda o `Debug` do
-/// `NewSale` e invalida o botão de impressão da venda anterior.
+/// Qualquer edição — texto, categoria da linha ou fiado — muda o `Debug`
+/// do `NewSale` e invalida o botão de impressão da venda anterior.
 fn pos_form_fp(data: &models::NewSale) -> String {
     format!("{data:?}")
 }
@@ -2159,14 +2080,19 @@ fn pos_item_row(
     idx: usize,
     row_count: usize,
     item: &mut models::NewSaleItem,
-    sale_type: models::SaleType,
     wide: bool,
     delete_idx: &mut Option<usize>,
     sale_error: &mut String,
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-        wrap_label(ui, &format!("Item {}", idx + 1), 13.0, ds::TITLE, true);
+        wrap_label(
+            ui,
+            &format!("{} — {}", format!("Item {}", idx + 1), item.item_type.label_ptbr()),
+            13.0,
+            ds::TITLE,
+            true,
+        );
         if row_count > 1 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -2181,17 +2107,49 @@ fn pos_item_row(
         }
     });
     ui.add_space(4.0);
+    // Seletor de categoria da linha (POS rápido: 3 toques, sem dropdown).
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        for (variant, label) in [
+            (models::SaleType::Rapida, "⚡ Acessório"),
+            (models::SaleType::Servico, "🔧 Serviço"),
+            (models::SaleType::Aparelho, "📱 Aparelho"),
+        ] {
+            let selected = item.item_type == variant;
+            let mut btn = egui::Button::new(egui::RichText::new(label).size(12.0).strong())
+                .selected(selected)
+                .rounding(Rounding::same(8.0))
+                .min_size(Vec2::new(110.0, 34.0));
+            if selected {
+                btn = btn
+                    .fill(ds::EMERALD_SOFT_BG)
+                    .stroke(egui::Stroke::new(1.5, ds::EMERALD));
+            } else {
+                btn = btn
+                    .fill(ds::INPUT_BG)
+                    .stroke(egui::Stroke::new(1.0, ds::BORDER));
+            }
+            if ui.add(btn).on_hover_text("Categoria deste item").clicked() && !selected {
+                item.item_type = variant;
+                if variant != models::SaleType::Aparelho {
+                    item.imei.clear();
+                }
+                sale_error.clear();
+            }
+        }
+    });
+    ui.add_space(4.0);
     if wide {
         egui::Grid::new(format!("pos_item_{idx}"))
             .num_columns(2)
             .min_col_width(150.0)
             .spacing(Vec2::new(12.0, 12.0))
             .show(ui, |ui| {
-                pos_item_fields(ui, idx, item, sale_type, f32::INFINITY);
+                pos_item_fields(ui, item, f32::INFINITY);
             });
     } else {
         ui.vertical(|ui| {
-            pos_item_fields(ui, idx, item, sale_type, ui.available_width());
+            pos_item_fields(ui, item, ui.available_width());
         });
     }
     // Prévia do subtotal (só quando parseável, para não poluir o form).
@@ -2216,29 +2174,21 @@ fn pos_item_row(
 
 /// Campos de uma linha de item (grade wide / empilhada narrow).
 /// `w` infinito = ramo grade (usa `end_row`); finito = ramo empilhado.
-/// No Aparelho, só o item #1 exige IMEI (linhas extras aceitam acessórios).
-fn pos_item_fields(
-    ui: &mut egui::Ui,
-    idx: usize,
-    item: &mut models::NewSaleItem,
-    sale_type: models::SaleType,
-    w: f32,
-) {
-    let imei_label = if idx == 0 {
-        "IMEI / Nº de Série (obrigatório — garantia):"
-    } else {
-        "IMEI / Nº de Série (opcional):"
-    };
+/// Categoria sai da própria linha (`item.item_type`): cada item Aparelho
+/// exige o próprio IMEI; Serviço e acessório têm IMEI oculto.
+fn pos_item_fields(ui: &mut egui::Ui, item: &mut models::NewSaleItem, w: f32) {
+    let kind = item.item_type;
+    let imei_label = "IMEI / Nº de Série (obrigatório — garantia):";
     if w.is_infinite() {
         ui.add(
             egui::Label::new(
-                egui::RichText::new(format!("{}:", models::item_label(sale_type)))
+                egui::RichText::new(format!("{}:", models::item_label(kind)))
                     .size(13.0)
                     .color(ds::MUTED),
             )
             .wrap(),
         );
-        ui.add(styled_singleline(&mut item.name, models::item_hint(sale_type)).desired_width(w));
+        ui.add(styled_singleline(&mut item.name, models::item_hint(kind)).desired_width(w));
         ui.end_row();
         ui.add(
             egui::Label::new(
@@ -2260,7 +2210,7 @@ fn pos_item_fields(
         );
         ui.add(styled_singleline(&mut item.unit_price, "Ex.: 149,90…").desired_width(w));
         ui.end_row();
-        if sale_type == models::SaleType::Aparelho {
+        if kind == models::SaleType::Aparelho {
             ui.add(
                 egui::Label::new(egui::RichText::new(imei_label).size(13.0).color(ds::MUTED))
                     .wrap(),
@@ -2271,13 +2221,13 @@ fn pos_item_fields(
     } else {
         wrap_label(
             ui,
-            &format!("{}:", models::item_label(sale_type)),
+            &format!("{}:", models::item_label(kind)),
             13.0,
             ds::MUTED,
             false,
         );
         ui.add_space(4.0);
-        ui.add(styled_singleline(&mut item.name, models::item_hint(sale_type)).desired_width(w));
+        ui.add(styled_singleline(&mut item.name, models::item_hint(kind)).desired_width(w));
         ui.add_space(8.0);
         wrap_label(ui, "Quantidade:", 13.0, ds::MUTED, false);
         ui.add_space(4.0);
@@ -2286,7 +2236,7 @@ fn pos_item_fields(
         wrap_label(ui, "Valor Unitário (R$):", 13.0, ds::MUTED, false);
         ui.add_space(4.0);
         ui.add(styled_singleline(&mut item.unit_price, "Ex.: 149,90…").desired_width(w));
-        if sale_type == models::SaleType::Aparelho {
+        if kind == models::SaleType::Aparelho {
             ui.add_space(8.0);
             wrap_label(ui, imei_label, 13.0, ds::MUTED, false);
             ui.add_space(4.0);
@@ -2336,19 +2286,20 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                 }
 
                 ds::form_frame().show(ui, |ui| {
-                    wrap_label(ui, "Tipo de Atendimento:", 13.0, ds::TITLE, true);
+                    wrap_label(
+                        ui,
+                        "Itens da venda (misture acessórios, serviços e aparelhos):",
+                        13.0,
+                        ds::TITLE,
+                        true,
+                    );
                     ui.add_space(8.0);
-                    sale_type_selector(ui, &mut data.sale_type, &mut app.data.sale_error);
-                    ui.add_space(4.0);
-                    wrap_label(ui, data.sale_type.label_ptbr(), 12.0, ds::MUTED, false);
-                    ui.add_space(12.0);
                     // 1 linha por padrão (venda simples ultrarrápida); a
                     // lixeira some na linha única para nunca zerar o form.
                     if data.items.is_empty() {
                         data.items.push(models::NewSaleItem::default());
                     }
                     let wide = is_wide_hysteresis(ui, "pos_form", BP_MEDIUM);
-                    let sale_type = data.sale_type;
                     let mut delete_idx: Option<usize> = None;
                     let row_count = data.items.len();
                     for (idx, item) in data.items.iter_mut().enumerate() {
@@ -2362,7 +2313,6 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                             idx,
                             row_count,
                             item,
-                            sale_type,
                             wide,
                             &mut delete_idx,
                             &mut app.data.sale_error,
@@ -2371,127 +2321,35 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                     if let Some(idx) = delete_idx {
                         data.items.remove(idx);
                     }
-                    // IMEI fora do Aparelho: limpa resíduos de troca de tipo
-                    // (mesma semântica do form antigo de item único).
-                    if data.sale_type != models::SaleType::Aparelho {
-                        for item in data.items.iter_mut() {
-                            item.imei.clear();
-                        }
-                    }
                     ui.add_space(8.0);
-                    if ui
-                        .add(
-                            ghost_button("➕ Adicionar Outro Item", 13.0)
-                                .min_size(Vec2::new(ui.available_width(), 44.0)),
-                        )
-                        .clicked()
-                    {
-                        data.items.push(models::NewSaleItem::default());
-                        app.data.sale_error.clear();
-                    }
+                    // POS rápido: 3 botões distintos (sem dropdown).
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        let btn_w =
+                            fluid_button_width(ui.available_width(), 3, 8.0, 130.0);
+                        for (kind, label) in [
+                            (models::SaleType::Aparelho, "📱 + Aparelho"),
+                            (models::SaleType::Servico, "🔧 + Serviço"),
+                            (models::SaleType::Rapida, "⚡ + Acessório"),
+                        ] {
+                            if ui
+                                .add(
+                                    ghost_button(label, 13.0)
+                                        .min_size(Vec2::new(btn_w, 44.0)),
+                                )
+                                .on_hover_text("Adicionar item desta categoria")
+                                .clicked()
+                            {
+                                data.items.push(models::NewSaleItem {
+                                    item_type: kind,
+                                    ..Default::default()
+                                });
+                                app.data.sale_error.clear();
+                            }
+                        }
+                    });
 
                     ui.add_space(16.0);
-                    // Barra primária: só Dinheiro, Cartão e Pix. No fiado, o meio
-                    // escolhido aqui é o da entrada (valor recebido agora).
-                    let metodo_titulo = if data.is_fiado {
-                        "Meio da entrada (valor recebido agora):"
-                    } else {
-                        "Forma de Pagamento:"
-                    };
-                    wrap_label(ui, metodo_titulo, 13.0, ds::TITLE, true);
-                    ui.add_space(8.0);
-                    if is_wide_hysteresis(ui, "pos_pay", 560.0) {
-                        // Linha fluida com quebra: nunca comprime além do mínimo legível.
-                        let btn_w = fluid_button_width(ui.available_width(), 3, 8.0, 140.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                            for (variant, label) in [
-                                (models::PaymentMethod::Cash, "💵 Dinheiro"),
-                                (models::PaymentMethod::Card, "💳 Cartão"),
-                                (models::PaymentMethod::Pix, "📱 Pix"),
-                            ] {
-                                let selected = data.payment_method.as_ref() == Some(&variant);
-                                let mut btn = egui::Button::new(
-                                    egui::RichText::new(label).size(14.0).strong(),
-                                )
-                                .selected(selected)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(btn_w, 44.0));
-                                if selected {
-                                    btn = btn
-                                        .fill(ds::EMERALD_SOFT_BG)
-                                        .stroke(egui::Stroke::new(1.5, ds::EMERALD));
-                                } else {
-                                    btn = btn
-                                        .fill(ds::INPUT_BG)
-                                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                                }
-                                if ui.add(btn).clicked() {
-                                    data.payment_method = Some(variant);
-                                    app.data.sale_error.clear();
-                                }
-                            }
-                        });
-                    } else {
-                        ui.vertical(|ui| {
-                            for (variant, label) in [
-                                (models::PaymentMethod::Cash, "💵 Dinheiro"),
-                                (models::PaymentMethod::Card, "💳 Cartão"),
-                                (models::PaymentMethod::Pix, "📱 Pix"),
-                            ] {
-                                let selected = data.payment_method.as_ref() == Some(&variant);
-                                let mut btn = egui::Button::new(
-                                    egui::RichText::new(label).size(14.0).strong(),
-                                )
-                                .selected(selected)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(ui.available_width(), 44.0));
-                                if selected {
-                                    btn = btn
-                                        .fill(ds::EMERALD_SOFT_BG)
-                                        .stroke(egui::Stroke::new(1.5, ds::EMERALD));
-                                } else {
-                                    btn = btn
-                                        .fill(ds::INPUT_BG)
-                                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                                }
-                                if ui.add(btn).clicked() {
-                                    data.payment_method = Some(variant);
-                                    app.data.sale_error.clear();
-                                }
-                                ui.add_space(8.0);
-                            }
-                        });
-                    }
-                    ui.add_space(8.0);
-                    match &data.payment_method {
-                        Some(pm) => {
-                            let label = match pm {
-                                models::PaymentMethod::Cash => "💵 Dinheiro",
-                                models::PaymentMethod::Card => "💳 Cartão",
-                                models::PaymentMethod::Pix => "📱 Pix",
-                                // Legado: exibido se o banco contiver vendas antigas;
-                                // a barra acima não oferece mais esta opção.
-                                models::PaymentMethod::Fiado => "📒 Fiado",
-                            };
-                            wrap_label(
-                                ui,
-                                &format!("Pagamento selecionado: {label}"),
-                                13.0,
-                                ds::EMERALD,
-                                true,
-                            );
-                        }
-                        None => {
-                            wrap_label(
-                                ui,
-                                "Nenhum pagamento selecionado — toque em uma opção acima.",
-                                13.0,
-                                ds::MUTED,
-                                false,
-                            );
-                        }
-                    }
 
                     // Total geral = soma dos subtotais parseáveis das linhas.
                     let total_calc = pos_total_calc(&data.items);
@@ -2507,13 +2365,15 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                             app.data.sale_error.clear();
                         }
                     });
-                    // Campos condicionais por tipo de atendimento: Serviço e
-                    // Aparelho exigem cliente (garantia); Aparelho exige
-                    // também IMEI/série. Venda Rápida mantém o form enxuto.
-                    let needs_client = data.is_fiado || data.sale_type.requires_client();
+                    // Campos condicionais por categoria das linhas: qualquer
+                    // Serviço/Aparelho exige cliente (garantia); telefone
+                    // aparece no mesmo caso. Acessórios puros mantêm o form
+                    // enxuto. Resposta Q3 aprovada.
+                    let needs_warranty = models::sale_requires_client(&data.items);
+                    let needs_client = data.is_fiado || needs_warranty;
                     if needs_client {
                         ui.add_space(8.0);
-                        let client_label = if data.sale_type.requires_client() {
+                        let client_label = if needs_warranty {
                             "Nome do Cliente (obrigatório — garantia):"
                         } else {
                             "Cliente (obrigatório no fiado):"
@@ -2527,7 +2387,11 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                     } else {
                         data.client_name.clear();
                     }
-                    if data.sale_type != models::SaleType::Rapida {
+                    if data
+                        .items
+                        .iter()
+                        .any(|i| i.item_type != models::SaleType::Rapida)
+                    {
                         ui.add_space(8.0);
                         wrap_label(ui, "Telefone (opcional):", 13.0, ds::MUTED, false);
                         ui.add_space(4.0);
@@ -2557,16 +2421,12 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                             .parse()
                             .unwrap_or(0.0);
                         let restante = (total_calc - pago).max(0.0);
-                        // Destino da entrada segue a regra do caixa: só dinheiro
-                        // físico vai para a gaveta; cartão/Pix vão para o banco.
-                        let destino = match &data.payment_method {
-                            Some(models::PaymentMethod::Cash) | None => "gaveta",
-                            Some(_) => "banco",
-                        };
+                        // Todo valor recebido entra hoje na gaveta
+                        // (meio de pagamento removido).
                         wrap_label(
                             ui,
                             &format!(
-                                "📒 Restante em aberto: {} • {} entra hoje ({destino}).",
+                                "📒 Restante em aberto: {} • {} entra hoje (gaveta).",
                                 fmt_money(restante),
                                 fmt_money(pago.max(0.0))
                             ),
@@ -2574,8 +2434,65 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                             ds::AMBER,
                             false,
                         );
+                        data.valor_recebido.clear();
                     } else {
                         data.paid_amount.clear();
+                        // Troco: opcional para velocidade — vazio = exato.
+                        ui.add_space(8.0);
+                        wrap_label(ui, "Valor Recebido (R$):", 13.0, ds::MUTED, false);
+                        ui.add_space(4.0);
+                        ui.add(
+                            styled_singleline(
+                                &mut data.valor_recebido,
+                                "Vazio = exato • Ex.: 600,00…",
+                            )
+                            .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(4.0);
+                        let raw = data.valor_recebido.trim().replace(',', ".");
+                        if raw.is_empty() {
+                            wrap_label(
+                                ui,
+                                "💵 Sem troco (pagamento exato).",
+                                12.0,
+                                ds::EMERALD,
+                                false,
+                            );
+                        } else {
+                            match raw.parse::<f64>() {
+                                Ok(r) if r.is_finite() && r >= 0.0 => {
+                                    if r + 1e-6 < total_calc {
+                                        wrap_label(
+                                            ui,
+                                            "⚠️ Valor recebido menor que o total.",
+                                            12.0,
+                                            ds::CORAL,
+                                            false,
+                                        );
+                                    } else {
+                                        wrap_label(
+                                            ui,
+                                            &format!(
+                                                "💵 Troco: {}",
+                                                fmt_money((r - total_calc).max(0.0))
+                                            ),
+                                            12.0,
+                                            ds::EMERALD,
+                                            true,
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    wrap_label(
+                                        ui,
+                                        "⚠️ Valor recebido inválido.",
+                                        12.0,
+                                        ds::CORAL,
+                                        false,
+                                    );
+                                }
+                            }
+                        }
                     }
                     ui.add_space(8.0);
                     // Faixa de total plana (sem borda): evita card-in-card dentro do formulário.
@@ -2612,15 +2529,10 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                     )
                     .clicked()
                 {
-                    if data.payment_method.is_none() {
-                        app.data.sale_error = if data.is_fiado {
-                            "⚠️ Selecione o meio da entrada (Dinheiro, Cartão ou Pix).".to_string()
-                        } else {
-                            "⚠️ Selecione a forma de pagamento.".to_string()
-                        };
-                    } else if data.items.is_empty() {
+                    if data.items.is_empty() {
                         app.data.sale_error = "⚠️ Adicione ao menos 1 item à venda.".to_string();
-                    } else if data.sale_type.requires_client() && data.client_name.trim().is_empty()
+                    } else if models::sale_requires_client(&data.items)
+                        && data.client_name.trim().is_empty()
                     {
                         app.data.sale_error =
                             "⚠️ Informe o nome do cliente (obrigatório para garantia).".to_string();
@@ -2646,14 +2558,10 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                                 ));
                                 break;
                             }
-                            if idx == 0
-                                && data.sale_type.requires_imei()
-                                && it.imei.trim().is_empty()
-                            {
-                                row_err = Some(
-                                    "⚠️ Item 1: informe o IMEI/nº de série do aparelho."
-                                        .to_string(),
-                                );
+                            if it.item_type.requires_imei() && it.imei.trim().is_empty() {
+                                row_err = Some(format!(
+                                    "⚠️ Item {n}: informe o IMEI/nº de série do aparelho."
+                                ));
                                 break;
                             }
                         }
@@ -2668,6 +2576,9 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                             }
                             if !data.paid_amount.trim().is_empty() {
                                 data.paid_amount = data.paid_amount.trim().replace(',', ".");
+                            }
+                            if !data.valor_recebido.trim().is_empty() {
+                                data.valor_recebido = data.valor_recebido.trim().replace(',', ".");
                             }
                             data.client_name = data.client_name.trim().to_string();
                             data.phone = data.phone.trim().to_string();
@@ -2701,7 +2612,30 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                                     None
                                 }
                             } else {
-                                None
+                                // Troco: vazio = exato; preenchido exige número
+                                // válido >= total (banco revalida; caixa soma o
+                                // total, nunca o recebido).
+                                let raw = data.valor_recebido.trim();
+                                if raw.is_empty() {
+                                    None
+                                } else {
+                                    match raw.parse::<f64>() {
+                                        Ok(r)
+                                            if r.is_finite()
+                                                && r >= 0.0
+                                                && r + 1e-6 >= total_preview =>
+                                        {
+                                            None
+                                        }
+                                        Ok(_) => Some(
+                                            "⚠️ Valor recebido menor que o total da venda."
+                                                .to_string(),
+                                        ),
+                                        Err(_) => Some(
+                                            "⚠️ Valor recebido inválido.".to_string(),
+                                        ),
+                                    }
+                                }
                             };
                             if let Some(msg) = fiado_err {
                                 app.data.sale_error = msg;
@@ -2713,10 +2647,10 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                                             // recibo: o ID vem do insert acima.
                                             app.data.last_sale = db_guard.get_sale_by_id(new_id);
                                             data.items = vec![models::NewSaleItem::default()];
-                                            data.payment_method = None;
                                             data.client_name.clear();
                                             data.phone.clear();
                                             data.paid_amount.clear();
+                                            data.valor_recebido.clear();
                                             data.is_fiado = false;
                                             // Linha de base do anti-vazamento: o
                                             // formulário limpo; qualquer digitação
@@ -2763,9 +2697,17 @@ fn render_pos(ui: &mut egui::Ui, app: &mut App) {
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!(
-                                            "✅ Venda #{} registrada com sucesso! ({})",
+                                            "✅ Venda #{} registrada com sucesso! ({}){}",
                                             last.id,
-                                            last.sale_type.label_ptbr()
+                                            last.sale_type.label_ptbr(),
+                                            if last.troco > 0.005 {
+                                                format!(
+                                                    " • Troco: {}",
+                                                    fmt_money(last.troco)
+                                                )
+                                            } else {
+                                                String::new()
+                                            }
                                         ))
                                         .size(13.0)
                                         .strong()
@@ -2855,93 +2797,6 @@ fn fiado_status_filter(idx: usize) -> Option<models::SaleStatus> {
         1 => Some(models::SaleStatus::Pendente),
         2 => Some(models::SaleStatus::Parcial),
         _ => None,
-    }
-}
-
-/// Seletor do meio de pagamento do abate (Dinheiro, Cartão ou Pix).
-/// Reusa o padrão visual da barra do PDV: selecionado em destaque esmeralda.
-fn abate_method_selector(ui: &mut egui::Ui, app: &mut App) {
-    let options = [
-        (models::PaymentMethod::Cash, "💵 Dinheiro"),
-        (models::PaymentMethod::Card, "💳 Cartão"),
-        (models::PaymentMethod::Pix, "📱 Pix"),
-    ];
-    if is_wide_hysteresis(ui, "abate_method", 560.0) {
-        let btn_w = fluid_button_width(ui.available_width(), 3, 8.0, 130.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            for (variant, label) in options {
-                let selected = app.data.fiado_abate_method.as_ref() == Some(&variant);
-                let mut btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong())
-                    .selected(selected)
-                    .rounding(Rounding::same(8.0))
-                    .min_size(Vec2::new(btn_w, 44.0));
-                if selected {
-                    btn = btn
-                        .fill(ds::EMERALD_SOFT_BG)
-                        .stroke(egui::Stroke::new(1.5, ds::EMERALD));
-                } else {
-                    btn = btn
-                        .fill(ds::INPUT_BG)
-                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                }
-                if ui.add(btn).clicked() {
-                    app.data.fiado_abate_method = Some(variant);
-                    app.data.fiado_feedback.clear();
-                }
-            }
-        });
-    } else {
-        ui.vertical(|ui| {
-            for (variant, label) in options {
-                let selected = app.data.fiado_abate_method.as_ref() == Some(&variant);
-                let mut btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong())
-                    .selected(selected)
-                    .rounding(Rounding::same(8.0))
-                    .min_size(Vec2::new(ui.available_width(), 44.0));
-                if selected {
-                    btn = btn
-                        .fill(ds::EMERALD_SOFT_BG)
-                        .stroke(egui::Stroke::new(1.5, ds::EMERALD));
-                } else {
-                    btn = btn
-                        .fill(ds::INPUT_BG)
-                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                }
-                if ui.add(btn).clicked() {
-                    app.data.fiado_abate_method = Some(variant);
-                    app.data.fiado_feedback.clear();
-                }
-                ui.add_space(8.0);
-            }
-        });
-    }
-    match &app.data.fiado_abate_method {
-        Some(m) => {
-            let destino = match m {
-                models::PaymentMethod::Cash => "gaveta",
-                _ => "banco",
-            };
-            wrap_label(
-                ui,
-                &format!(
-                    "Meio selecionado: {} • entra hoje ({destino}).",
-                    m.label_ptbr()
-                ),
-                13.0,
-                ds::EMERALD,
-                true,
-            );
-        }
-        None => {
-            wrap_label(
-                ui,
-                "Nenhum meio selecionado — padrão: Dinheiro (gaveta).",
-                13.0,
-                ds::MUTED,
-                false,
-            );
-        }
     }
 }
 
@@ -3174,7 +3029,6 @@ fn render_fiado(ui: &mut egui::Ui, app: &mut App) {
                                                     {
                                                         app.data.fiado_selected = Some(d.id);
                                                         app.data.fiado_abate.clear();
-                                                        app.data.fiado_abate_method = None;
                                                         app.data.fiado_feedback.clear();
                                                     }
                                                     if ui
@@ -3253,7 +3107,7 @@ fn render_fiado(ui: &mut egui::Ui, app: &mut App) {
                             ui.add_space(4.0);
                             wrap_label(
                                 ui,
-                                "O valor entra no caixa de hoje (Dinheiro→gaveta, Cartão/Pix→banco) e reduz o restante.",
+                                "O valor entra hoje na gaveta como Entrada e reduz o restante.",
                                 12.0,
                                 ds::MUTED,
                                 false,
@@ -3263,10 +3117,6 @@ fn render_fiado(ui: &mut egui::Ui, app: &mut App) {
                                 styled_singleline(&mut app.data.fiado_abate, "Ex.: 50,00…")
                                     .desired_width(f32::INFINITY),
                             );
-                            ui.add_space(12.0);
-                            wrap_label(ui, "Meio deste abate:", 13.0, ds::TITLE, true);
-                            ui.add_space(8.0);
-                            abate_method_selector(ui, app);
                         });
                         if !app.data.fiado_feedback.is_empty() {
                             let msg = app.data.fiado_feedback.clone();
@@ -3288,33 +3138,24 @@ fn render_fiado(ui: &mut egui::Ui, app: &mut App) {
                             .clicked()
                         {
                             let raw = app.data.fiado_abate.trim().replace(',', ".");
-                            // Sem seleção explícita, o abate entra como Dinheiro (gaveta).
-                            let method = app
-                                .data
-                                .fiado_abate_method
-                                .clone()
-                                .unwrap_or(models::PaymentMethod::Cash);
                             match raw.parse::<f64>() {
                                 Ok(v) if v.is_finite() && v > 0.0 => match lock_db(&db) {
                                     Some(mut guard) => {
-                                        match guard.register_abate_fiado(s.id, v, &method) {
+                                        match guard.register_abate_fiado_sem_meio(s.id, v) {
                                             Ok(novo) => {
                                                 app.data.fiado_abate.clear();
-                                                app.data.fiado_abate_method = None;
                                                 app.data.fiado_is_error = false;
                                                 if novo <= 1e-6 {
                                                     app.data.fiado_feedback = format!(
-                                                        "✅ Conta #{} quitada com abate de {} ({}).",
+                                                        "✅ Conta #{} quitada com abate de {}.",
                                                         s.id,
                                                         fmt_money(v),
-                                                        method.label_ptbr()
                                                     );
                                                     app.data.fiado_selected = None;
                                                 } else {
                                                     app.data.fiado_feedback = format!(
-                                                        "✅ Abate de {} ({}) registrado. Restante: {}.",
+                                                        "✅ Abate de {} registrado. Restante: {}.",
                                                         fmt_money(v),
-                                                        method.label_ptbr(),
                                                         fmt_money(novo)
                                                     );
                                                 }
@@ -3358,8 +3199,8 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
             page_header(
                 ui,
                 "💰",
-                "Controle de Caixa",
-                "Entradas, saídas e dinheiro em gaveta",
+                "Fluxo Financeiro",
+                "Entradas, saídas e perdas • saldo unificado",
             );
             ui.add_space(4.0);
 
@@ -3505,92 +3346,8 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
                         }
                     });
                 }
-
-                let show_source = !matches!(
-                    app.data.movement_kind,
-                    models::MovementKind::Nenhum
-                );
-                if show_source {
-                    let source_title = if app.data.movement_kind == models::MovementKind::Entrada {
-                        "Onde entra o valor?"
-                    } else {
-                        "De onde sai o valor?"
-                    };
-                    ui.add_space(12.0);
-                    wrap_label(ui, source_title, 13.0, ds::TITLE, true);
-                    ui.add_space(8.0);
-                    if is_wide_hysteresis(ui, "cash_source", 480.0) {
-                        // Rótulos curtos (Gaveta/Banco) + legenda inline sempre
-                        // visível, sem nenhum popup de hover.
-                        let src_w = fluid_button_width(ui.available_width(), 2, 8.0, 150.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                            for variant in [models::CashSource::Drawer, models::CashSource::Bank] {
-                                let selected = app.data.movement_source.as_ref() == Some(&variant);
-                                let mut btn = egui::Button::new(
-                                    egui::RichText::new(variant.short_label()).size(13.0),
-                                )
-                                .selected(selected)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(src_w, 44.0));
-                                if selected {
-                                    btn = btn
-                                        .fill(ds::BLUE_DIM_BG)
-                                        .stroke(egui::Stroke::new(1.5, ds::BLUE));
-                                } else {
-                                    btn = btn
-                                        .fill(ds::INPUT_BG)
-                                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                                }
-                                if ui.add(btn).clicked() {
-                                    app.data.movement_source = Some(variant);
-                                    app.data.movement_error.clear();
-                                }
-                            }
-                        });
-                        ui.add_space(8.0);
-                        wrap_label(
-                            ui,
-                            "💵 Gaveta = dinheiro físico • 🏦 Banco = conta / Pix.",
-                            12.0,
-                            ds::MUTED,
-                            false,
-                        );
-                    } else {
-                        ui.vertical(|ui| {
-                            for variant in [models::CashSource::Drawer, models::CashSource::Bank] {
-                                let selected = app.data.movement_source.as_ref() == Some(&variant);
-                                let mut btn = egui::Button::new(
-                                    egui::RichText::new(variant.short_label()).size(13.0),
-                                )
-                                .selected(selected)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(ui.available_width(), 44.0));
-                                if selected {
-                                    btn = btn
-                                        .fill(ds::BLUE_DIM_BG)
-                                        .stroke(egui::Stroke::new(1.5, ds::BLUE));
-                                } else {
-                                    btn = btn
-                                        .fill(ds::INPUT_BG)
-                                        .stroke(egui::Stroke::new(1.0, ds::BORDER));
-                                }
-                                if ui.add(btn).clicked() {
-                                    app.data.movement_source = Some(variant);
-                                    app.data.movement_error.clear();
-                                }
-                                ui.add_space(8.0);
-                            }
-                            wrap_label(
-                                ui,
-                                "💵 Gaveta = dinheiro físico • 🏦 Banco = conta / Pix.",
-                                12.0,
-                                ds::MUTED,
-                                false,
-                            );
-                        });
-                    }
-                }
+                // Origem removida: saldo unificado, todo lançamento manual é
+                // Entrada, Saída ou Perda (sempre gaveta no banco).
             });
 
             if !app.data.movement_error.is_empty() {
@@ -3607,12 +3364,10 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
                 .clicked()
             {
                 let kind = app.data.movement_kind.clone();
-                let needs_source = !matches!(kind, models::MovementKind::Nenhum);
                 if kind == models::MovementKind::Nenhum
-                    || (needs_source && app.data.movement_source.is_none())
                 {
                     app.data.movement_error =
-                        "⚠️ Selecione o tipo de movimentação e a origem do valor.".to_string();
+                        "⚠️ Selecione o tipo de movimentação.".to_string();
                 } else if data.amount.trim().is_empty()
                     || data
                         .amount
@@ -3628,7 +3383,8 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
                         "⚠️ Informe a descrição/motivo da movimentação.".to_string();
                 } else {
                     data.amount = data.amount.trim().replace(',', ".");
-                    let source = app.data.movement_source.clone().unwrap_or_default();
+                    // Saldo unificado: origem fixa na gaveta.
+                    let source = models::CashSource::Drawer;
                     match lock_db(&db) {
                         Some(mut db_guard) => {
                             let result = match kind {
@@ -3655,7 +3411,6 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
                                     data.description.clear();
                                     data.is_entry = true;
                                     app.data.movement_kind = models::MovementKind::Nenhum;
-                                    app.data.movement_source = None;
                                     app.data.movement_error.clear();
                                 }
                                 Err(e) => {
@@ -3678,27 +3433,41 @@ fn render_cash_register(ui: &mut egui::Ui, app: &mut App) {
             section_header(
                 ui,
                 "💵",
-                "Saldo em Dinheiro (gaveta)",
-                "Vendas em dinheiro + entradas da gaveta − saídas/perdas da gaveta • banco não altera",
+                "Saldo Geral",
+                "Total Entradas − Total Saídas − Total Perdas (saldo unificado)",
             );
 
             {
-                let (drawer, cash_sales) = match lock_db(&db) {
-                    Some(guard) => (guard.cash_in_drawer(), guard.total_cash_sales()),
+                let saldo = match lock_db(&db) {
+                    Some(guard) => guard.net_balance_global(),
                     None => {
                         error_banner(ui, "⚠️ Banco de dados temporariamente indisponível.");
-                        (0.0, 0.0)
+                        0.0
                     }
                 };
-                let drawer_kpis = [
-                    (
-                        "Dinheiro em gaveta (total)",
-                        fmt_money(drawer),
-                        ds::EMERALD,
-                    ),
-                    ("Vendas em dinheiro", fmt_money(cash_sales), ds::BLUE),
-                ];
-                kpi_grid(ui, 2, &drawer_kpis);
+                let color = if saldo < 0.0 { ds::CORAL } else { ds::EMERALD };
+                ds::card_frame().show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("SALDO LÍQUIDO DISPONÍVEL")
+                                    .size(14.0)
+                                    .strong()
+                                    .color(ds::MUTED),
+                            )
+                            .wrap(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(fmt_money(saldo))
+                                    .size(32.0)
+                                    .strong()
+                                    .color(color),
+                            )
+                            .wrap(),
+                        );
+                    });
+                });
             }
 
             ui.add_space(16.0);
@@ -3849,8 +3618,6 @@ fn summary_pairs_grid(ui: &mut egui::Ui, grid_id: &str, items: &[(&str, String, 
 fn consolidado_geral_card(
     ui: &mut egui::Ui,
     total_sales_all: f64,
-    total_sales_filtered: f64,
-    filter_name: &str,
     cash_in: f64,
     cash_out: f64,
     losses: f64,
@@ -3870,19 +3637,12 @@ fn consolidado_geral_card(
             .wrap(),
         );
         ui.add_space(8.0);
-        // 1 par por linha no estreito, 2 pares por linha no largo — sem linhas vazias.
-        let vendas_filtradas_label = format!("Total em Vendas ({filter_name})");
+        // Revenue-only: Faturamento (Entradas), Saídas, Perdas, Saldo.
         let items: Vec<(&str, String, Color32, bool)> = vec![
             (
-                "Total em Vendas (Todas):",
+                "Total Faturamento (Entradas):",
                 fmt_money(total_sales_all),
                 ds::BODY,
-                false,
-            ),
-            (
-                vendas_filtradas_label.as_str(),
-                fmt_money(total_sales_filtered),
-                ds::BLUE,
                 false,
             ),
             ("Entradas:", fmt_money(cash_in), ds::EMERALD, false),
@@ -3934,41 +3694,6 @@ fn report_card(
         ui.add_space(8.0);
         add_contents(ui);
     });
-}
-
-fn vendas_pagamento_grid(ui: &mut egui::Ui, grid_id: &str, methods: &[(&str, f64)]) {
-    // Mesmo padrão do consolidado: bloco vertical no estreito (< 520px),
-    // com histerese por `grid_id` contra vibração na fronteira.
-    if !is_wide_hysteresis(ui, ("paggrid_side", grid_id), SUMMARY_SIDE_BY_SIDE_MIN) {
-        for (i, (name, total)) in methods.iter().enumerate() {
-            summary_stacked_block(ui, name, &fmt_money(*total), ds::BODY, true);
-            if i + 1 < methods.len() {
-                ui.add_space(12.0);
-            }
-        }
-        return;
-    }
-    egui::Grid::new(grid_id)
-        .num_columns(2)
-        .min_col_width(200.0)
-        .spacing(Vec2::new(12.0, 8.0))
-        .show(ui, |ui| {
-            for (name, total) in methods {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(*name).size(13.0).color(ds::MUTED)).wrap(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(fmt_money(*total))
-                            .size(13.0)
-                            .strong()
-                            .color(ds::BODY),
-                    )
-                    .wrap(),
-                );
-                ui.end_row();
-            }
-        });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4345,7 +4070,6 @@ fn executar_exportacao_csv(app: &mut App) {
     let day = app.data.export_day.clone();
     let month = app.data.export_month.clone();
     let year = app.data.export_year.clone();
-    let filtro_label = translate_payment(&app.data.report_payment_filter).to_string();
 
     let guard = match try_lock_db(&app.db_inner) {
         Ok(guard) => guard,
@@ -4439,7 +4163,7 @@ fn executar_exportacao_csv(app: &mut App) {
 
     let dados = crate::export::DadosRelatorio {
         escopo_label: &escopo_display,
-        filtro_pagamento: &filtro_label,
+        filtro_pagamento: "",
         total_vendas,
         total_recebido,
         total_devedor: total_devedor_escopo,
@@ -4766,7 +4490,8 @@ fn executar_exportacao_reposicao(
 }
 
 /// Chips de categoria da reposição: Todos + 1 por tipo de atendimento.
-/// Filtra via SQL (`sales.sale_type`); compõe com a busca textual.
+/// Filtra via SQL (`sale_items.item_type`, categoria da linha — acessórios
+/// de vendas mistas entram no filtro Acessórios); compõe com a busca textual.
 fn render_replenishment_category_chips(ui: &mut egui::Ui, app: &mut App) {
     const OPTIONS: [(Option<models::SaleType>, &str); 4] = [
         (None, "📦 Todos"),
@@ -5079,51 +4804,8 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
 
                 let db = Arc::clone(&app.db_inner);
 
-                ds::card_frame().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Filtrar por Pagamento:")
-                                    .size(13.0)
-                                    .color(ds::MUTED),
-                            )
-                            .wrap(),
-                        );
-                        let filter_label =
-                            translate_payment(&app.data.report_payment_filter).to_string();
-                        egui::ComboBox::from_id_salt("report_filter")
-                            .selected_text(filter_label)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut app.data.report_payment_filter,
-                                    models::PaymentMethod::Cash,
-                                    "Dinheiro",
-                                );
-                                ui.selectable_value(
-                                    &mut app.data.report_payment_filter,
-                                    models::PaymentMethod::Card,
-                                    "Cartão",
-                                );
-                                ui.selectable_value(
-                                    &mut app.data.report_payment_filter,
-                                    models::PaymentMethod::Pix,
-                                    "Pix",
-                                );
-                                ui.selectable_value(
-                                    &mut app.data.report_payment_filter,
-                                    models::PaymentMethod::Fiado,
-                                    "Fiado",
-                                );
-                            });
-                    });
-                });
-                ui.add_space(12.0);
-
-                let filter = app.data.report_payment_filter.clone();
                 let (
                     total_sales_all,
-                    total_sales_filtered,
                     cash_in,
                     cash_out,
                     losses,
@@ -5133,7 +4815,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                 ) = match lock_db(&db) {
                     Some(db_guard) => {
                         let total_sales_all = db_guard.total_sales();
-                        let total_sales_filtered = db_guard.total_sales_by_method(&filter);
                         let cash_in = db_guard.total_cash_in();
                         let cash_out = db_guard.total_cash_out();
                         let losses = db_guard.total_losses();
@@ -5142,7 +4823,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                         let saldo_devedor = db_guard.total_receivables_global();
                         (
                             total_sales_all,
-                            total_sales_filtered,
                             cash_in,
                             cash_out,
                             losses,
@@ -5153,7 +4833,7 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                     }
                     None => {
                         error_banner(ui, "⚠️ Banco de dados temporariamente indisponível.");
-                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                     }
                 };
 
@@ -5162,7 +4842,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                 } else {
                     ds::EMERALD
                 };
-                let filter_name = translate_payment(&filter).to_string();
                 // Largura real do container: abaixo de BP_WIDE (860) cada cartão
                 // ocupa a largura total (empilhado); lado a lado só com folga genuína.
                 if ui.available_width() < BP_WIDE {
@@ -5170,8 +4849,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                         consolidado_geral_card(
                             ui,
                             total_sales_all,
-                            total_sales_filtered,
-                            &filter_name,
                             cash_in,
                             cash_out,
                             losses,
@@ -5192,8 +4869,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                             consolidado_geral_card(
                                 &mut cols[0],
                                 total_sales_all,
-                                total_sales_filtered,
-                                &filter_name,
                                 cash_in,
                                 cash_out,
                                 losses,
@@ -5205,50 +4880,6 @@ fn render_reports(ui: &mut egui::Ui, app: &mut App) {
                             render_export_card(&mut cols[1], app);
                         });
                     });
-                }
-
-                ui.add_space(12.0);
-
-                {
-                    let db = Arc::clone(&app.db_inner);
-                    let methods = match lock_db(&db) {
-                        Some(guard) => vec![
-                            (
-                                "Dinheiro",
-                                guard.total_sales_by_method(&models::PaymentMethod::Cash),
-                            ),
-                            (
-                                "Cartão",
-                                guard.total_sales_by_method(&models::PaymentMethod::Card),
-                            ),
-                            (
-                                "Pix",
-                                guard.total_sales_by_method(&models::PaymentMethod::Pix),
-                            ),
-                            (
-                                "Fiado",
-                                guard.total_sales_by_method(&models::PaymentMethod::Fiado),
-                            ),
-                        ],
-                        None => {
-                            error_banner(ui, "⚠️ Banco de dados temporariamente indisponível.");
-                            vec![
-                                ("Dinheiro", 0.0),
-                                ("Cartão", 0.0),
-                                ("Pix", 0.0),
-                                ("Fiado", 0.0),
-                            ]
-                        }
-                    };
-                    report_card(
-                        ui,
-                        "💳",
-                        "Vendas por Pagamento",
-                        "Receita total por meio de pagamento",
-                        |ui| {
-                            vendas_pagamento_grid(ui, "vendas_pagamento_grid", &methods);
-                        },
-                    );
                 }
 
                 ui.add_space(12.0);
